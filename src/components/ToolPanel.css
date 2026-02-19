@@ -15,7 +15,8 @@
     align-items: center;
     padding: 0 8px;
     border-bottom: 1px solid var(--border-light);
-    min-height: 36px;
+    height: 44px;
+    min-height: 44px;
     background: var(--bg-sidebar);
 }
 

@@ -1,0 +1,454 @@
+.git-panel {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  background-color: var(--bg-secondary, #0f1419);
+}
+
+.app.light .git-panel {
+  background-color: #ffffff;
+}
+
+.git-header {
+  height: 44px;
+  padding: 0 18px;
+  border-bottom: 1px solid var(--border-light, #1a2332);
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+}
+
+.app.light .git-header {
+  border-bottom-color: #e2e8f0;
+}
+
+.git-header h3 {
+  margin: 0;
+  font-size: 14px;
+  font-weight: 600;
+  font-family: 'JetBrains Mono', 'Fira Code', monospace;
+  color: var(--text-primary, #e6edf3);
+}
+
+.app.light .git-header h3 {
+  color: #0f172a;
+}
+
+.refresh-btn {
+  background: var(--bg-hover, #151b23);
+  border: 1px solid var(--border-default, #232d3b);
+  color: var(--text-secondary, #9198a1);
+  border-radius: 8px;
+  padding: 6px 12px;
+  cursor: pointer;
+  font-size: 14px;
+  transition: all 0.2s ease;
+}
+
+.app.light .refresh-btn {
+  background: #f1f5f9;
+  border-color: #e2e8f0;
+}
+
+.refresh-btn:hover:not(:disabled) {
+  background: var(--bg-hover);
+  border-color: var(--accent-primary);
+  color: var(--accent-primary);
+  transform: translateY(-1px);
+}
+
+.refresh-btn:active:not(:disabled) {
+  transform: translateY(0) scale(0.98);
+}
+
+.refresh-btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.git-info {
+  padding: 14px 18px;
+  border-bottom: 1px solid var(--border-light, #262626);
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  background: var(--bg-hover);
+}
+
+.app.light .git-info {
+  border-bottom-color: #e5e5e5;
+  background: rgba(52, 88, 48, 0.04);
+}
+
+.app.dark .git-info {
+  background: rgba(90, 158, 84, 0.08);
+}
+
+.git-branch {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  font-size: 13px;
+  color: var(--text-primary, #e6edf3);
+}
+
+.branch-icon {
+  font-size: 16px;
+  color: var(--accent-primary);
+}
+
+.app.light .branch-icon {
+  color: #345830;
+}
+
+.app.dark .branch-icon {
+  color: #5a9e54;
+}
+
+.branch-name {
+  font-weight: 700;
+  font-family: 'JetBrains Mono', 'Fira Code', monospace;
+  color: var(--accent-primary);
+}
+
+.app.light .branch-name {
+  color: #345830;
+}
+
+.app.dark .branch-name {
+  color: #5a9e54;
+}
+
+.git-sync {
+  display: flex;
+  gap: 12px;
+  font-size: 12px;
+  font-weight: 700;
+  font-family: 'JetBrains Mono', 'Fira Code', monospace;
+}
+
+.ahead {
+  color: var(--accent-primary);
+}
+
+.app.light .ahead {
+  color: #345830;
+}
+
+.app.dark .ahead {
+  color: #5a9e54;
+}
+
+.behind {
+  color: #ff6b6b;
+}
+
+.app.light .behind {
+  color: #dc2626;
+}
+
+.git-empty,
+.git-error,
+.git-loading,
+.git-clean {
+  padding: 48px 24px;
+  text-align: center;
+  color: var(--text-muted, #6e7681);
+  font-size: 13px;
+  font-family: 'JetBrains Mono', 'Fira Code', monospace;
+}
+
+.error-detail {
+  margin-top: 10px;
+  font-size: 11px;
+  color: #ff6b6b;
+  font-family: 'JetBrains Mono', 'Fira Code', monospace;
+  background: rgba(255, 107, 107, 0.1);
+  padding: 8px 12px;
+  border-radius: 6px;
+  display: inline-block;
+}
+
+.app.light .error-detail {
+  color: #dc2626;
+  background: rgba(220, 38, 38, 0.08);
+}
+
+.git-files-container {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.git-files-list {
+  flex: 0 0 auto;
+  max-height: 40%;
+  overflow-y: auto;
+  border-bottom: 1px solid var(--border-light, #1a2332);
+}
+
+.app.light .git-files-list {
+  border-bottom-color: #e2e8f0;
+}
+
+.files-header {
+  padding: 10px 18px;
+  font-size: 10px;
+  font-weight: 700;
+  font-family: 'JetBrains Mono', 'Fira Code', monospace;
+  text-transform: uppercase;
+  letter-spacing: 1px;
+  color: var(--text-muted, #6e7681);
+  background: var(--bg-sidebar, #0a0e14);
+  border-bottom: 1px solid var(--border-light, #1a2332);
+}
+
+.app.light .files-header {
+  background: #f1f5f9;
+  border-bottom-color: #e2e8f0;
+}
+
+.git-file-item {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 18px;
+  cursor: pointer;
+  transition: all 0.15s ease;
+  font-size: 13px;
+  border-left: 2px solid transparent;
+}
+
+.git-file-item:hover {
+  background: var(--bg-hover);
+  border-left-color: var(--accent-primary);
+}
+
+.app.light .git-file-item:hover {
+  background: rgba(52, 88, 48, 0.06);
+  border-left-color: rgba(52, 88, 48, 0.5);
+}
+
+.app.dark .git-file-item:hover {
+  background: rgba(90, 158, 84, 0.1);
+  border-left-color: rgba(90, 158, 84, 0.5);
+}
+
+.git-file-item.selected {
+  background: var(--bg-active);
+  border-left-color: var(--accent-primary);
+}
+
+.app.light .git-file-item.selected {
+  background: rgba(52, 88, 48, 0.12);
+  border-left-color: #345830;
+}
+
+.app.dark .git-file-item.selected {
+  background: rgba(90, 158, 84, 0.15);
+  border-left-color: #5a9e54;
+}
+
+.file-status {
+  font-weight: 700;
+  font-family: 'JetBrains Mono', 'Fira Code', monospace;
+  width: 18px;
+  text-align: center;
+}
+
+.status-modified {
+  color: #ffc66d;
+}
+
+.app.light .status-modified {
+  color: #ca8a04;
+}
+
+.status-added {
+  color: #3fb950;
+}
+
+.app.light .status-added {
+  color: #059669;
+}
+
+.status-deleted {
+  color: #ff6b6b;
+}
+
+.app.light .status-deleted {
+  color: #dc2626;
+}
+
+.status-renamed {
+  color: #58a6ff;
+}
+
+.app.light .status-renamed {
+  color: #0284c7;
+}
+
+.status-untracked {
+  color: var(--text-hint, #484f58);
+}
+
+.git-file-item.selected .file-status {
+  color: inherit;
+}
+
+.file-path {
+  flex: 1;
+  font-family: 'JetBrains Mono', 'Fira Code', monospace;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--text-primary, #e6edf3);
+}
+
+.app.light .file-path {
+  color: #0f172a;
+}
+
+.staged-badge {
+  background: var(--gradient-accent);
+  color: white;
+  padding: 3px 8px;
+  border-radius: 6px;
+  font-size: 9px;
+  font-weight: 700;
+  font-family: 'JetBrains Mono', 'Fira Code', monospace;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+}
+
+.git-file-item.selected .staged-badge {
+  background: rgba(255, 255, 255, 0.2);
+}
+
+.git-diff-viewer {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.diff-header {
+  padding: 10px 18px;
+  background: var(--bg-sidebar, #0a0e14);
+  border-bottom: 1px solid var(--border-light, #1a2332);
+  font-size: 12px;
+  font-weight: 600;
+  font-family: 'JetBrains Mono', 'Fira Code', monospace;
+  color: var(--text-primary, #e6edf3);
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+}
+
+.app.light .diff-header {
+  background: #f1f5f9;
+  border-bottom-color: #e2e8f0;
+  color: #0f172a;
+}
+
+.view-file-btn {
+  padding: 6px 16px;
+  font-size: 11px;
+  font-family: 'JetBrains Mono', 'Fira Code', monospace;
+  font-weight: 600;
+  background: var(--gradient-accent);
+  color: white;
+  border: none;
+  border-radius: 6px;
+  cursor: pointer;
+  transition: all 0.25s cubic-bezier(0.4, 0, 0.2, 1);
+  box-shadow: 0 2px 6px var(--glow-primary);
+}
+
+.view-file-btn:hover {
+  transform: translateY(-2px);
+  box-shadow: 0 6px 16px var(--glow-primary);
+}
+
+.view-file-btn:active {
+  transform: translateY(0) scale(0.98);
+}
+
+.diff-content {
+  flex: 1;
+  overflow-y: auto;
+  padding: 12px 0;
+  font-family: 'JetBrains Mono', 'Fira Code', monospace;
+  font-size: 12px;
+  line-height: 1.6;
+  background: var(--bg-primary, #0a0e14);
+}
+
+.app.light .diff-content {
+  background: #f8fafc;
+}
+
+.diff-line {
+  padding: 2px 18px;
+  white-space: pre;
+  overflow-x: auto;
+}
+
+.diff-added {
+  background: rgba(63, 185, 80, 0.15);
+  color: #3fb950;
+}
+
+.app.light .diff-added {
+  background: rgba(5, 150, 105, 0.1);
+  color: #059669;
+}
+
+.diff-removed {
+  background: rgba(255, 107, 107, 0.15);
+  color: #ff6b6b;
+}
+
+.app.light .diff-removed {
+  background: rgba(220, 38, 38, 0.1);
+  color: #dc2626;
+}
+
+.diff-hunk {
+  background: var(--bg-hover);
+  color: var(--accent-primary);
+  font-weight: 600;
+}
+
+.app.light .diff-hunk {
+  background: rgba(52, 88, 48, 0.08);
+  color: #345830;
+}
+
+.app.dark .diff-hunk {
+  background: rgba(90, 158, 84, 0.1);
+  color: #5a9e54;
+}
+
+/* Scrollbar styling */
+.git-files-list::-webkit-scrollbar,
+.diff-content::-webkit-scrollbar {
+  width: 6px;
+}
+
+.git-files-list::-webkit-scrollbar-track,
+.diff-content::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.git-files-list::-webkit-scrollbar-thumb,
+.diff-content::-webkit-scrollbar-thumb {
+  background: var(--border-default, #232d3b);
+  border-radius: 3px;
+}
+
+.git-files-list::-webkit-scrollbar-thumb:hover,
+.diff-content::-webkit-scrollbar-thumb:hover {
+  background: var(--text-hint, #484f58);
+}

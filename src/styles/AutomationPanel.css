@@ -1,0 +1,549 @@
+.automation-panel {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  background: var(--bg-primary, #1a1a2e);
+  color: var(--text-primary, #e4e4e7);
+  overflow: hidden;
+}
+
+.automation-panel.light {
+  --bg-primary: #ffffff;
+  --bg-secondary: #f5f5f5;
+  --bg-tertiary: #e5e5e5;
+  --text-primary: #0a0a0a;
+  --text-secondary: #525252;
+  --border-color: #d4d4d4;
+  --accent-color: #345830;
+  --accent-hover: #243d21;
+  --success-color: #345830;
+  --warning-color: #854d0e;
+  --error-color: #991b1b;
+}
+
+.automation-panel.dark {
+  --bg-primary: #0a0a0a;
+  --bg-secondary: #141414;
+  --bg-tertiary: #1a1a1a;
+  --text-primary: #fafafa;
+  --text-secondary: #a3a3a3;
+  --border-color: #333333;
+  --accent-color: #5a9e54;
+  --accent-hover: #7ab874;
+  --success-color: #5a9e54;
+  --warning-color: #eab308;
+  --error-color: #ef4444;
+}
+
+.automation-header {
+  height: 44px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0 20px;
+  border-bottom: 1px solid var(--border-color);
+  background: var(--bg-secondary);
+}
+
+.automation-header h2 {
+  margin: 0;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--accent-color);
+}
+
+.automation-header .close-btn {
+  background: none;
+  border: none;
+  color: var(--text-secondary);
+  font-size: 20px;
+  cursor: pointer;
+  padding: 4px 8px;
+  border-radius: 4px;
+  transition: all 0.2s;
+}
+
+.automation-header .close-btn:hover {
+  background: var(--bg-tertiary);
+  color: var(--text-primary);
+}
+
+.automation-content {
+  flex: 1;
+  overflow-y: auto;
+  padding: 16px;
+}
+
+.automation-api-key-required {
+  padding: 16px;
+  margin-bottom: 16px;
+  background: rgba(239, 68, 68, 0.15);
+  border: 1px solid var(--error-color, #ef4444);
+  border-radius: 8px;
+  color: var(--text-primary);
+}
+
+.automation-api-key-required strong {
+  display: block;
+  margin-bottom: 8px;
+  color: var(--error-color, #ef4444);
+}
+
+.automation-api-key-required p {
+  margin: 0;
+  font-size: 13px;
+  line-height: 1.5;
+  color: var(--text-secondary);
+}
+
+.automation-section {
+  margin-bottom: 24px;
+  padding: 16px;
+  background: var(--bg-secondary);
+  border-radius: 8px;
+  border: 1px solid var(--border-color);
+}
+
+.automation-section h3 {
+  margin: 0 0 12px 0;
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--text-primary);
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+}
+
+.automation-section h4 {
+  margin: 16px 0 8px 0;
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--text-secondary);
+}
+
+.automation-section .hint-text {
+  font-size: 11px;
+  color: var(--text-secondary);
+  margin-bottom: 12px;
+}
+
+/* Quick Setup */
+.quick-setup {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.input-row {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.input-row label {
+  font-size: 12px;
+  color: var(--text-secondary);
+}
+
+.checkbox-row label {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  cursor: pointer;
+}
+
+.checkbox-row input[type="checkbox"] {
+  width: 16px;
+  height: 16px;
+  cursor: pointer;
+}
+
+.input-row input[type="number"] {
+  width: 80px;
+  padding: 8px 12px;
+  border: 1px solid var(--border-color);
+  border-radius: 6px;
+  background: var(--bg-tertiary);
+  color: var(--text-primary);
+  font-size: 14px;
+}
+
+.input-row textarea,
+.add-task-form textarea {
+  width: 100%;
+  padding: 10px 12px;
+  border: 1px solid var(--border-color);
+  border-radius: 6px;
+  background: var(--bg-tertiary);
+  color: var(--text-primary);
+  font-size: 13px;
+  font-family: inherit;
+  resize: vertical;
+  min-height: 60px;
+}
+
+.input-row textarea:focus,
+.add-task-form textarea:focus,
+.add-task-form input:focus {
+  outline: none;
+  border-color: var(--accent-color);
+}
+
+/* Templates */
+.templates {
+  margin-top: 12px;
+}
+
+.template-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.template-btn {
+  padding: 6px 12px;
+  background: var(--bg-tertiary);
+  border: 1px solid var(--border-color);
+  border-radius: 16px;
+  color: var(--text-secondary);
+  font-size: 11px;
+  cursor: pointer;
+  transition: all 0.2s;
+  max-width: 200px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.template-btn:hover:not(:disabled) {
+  background-color: var(--layer-hover);
+  border-color: var(--accent-color);
+}
+
+.template-btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+/* Add Task Form */
+.add-task-form {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.add-task-form input {
+  padding: 8px;
+  background-color: var(--input-bg);
+  border: 1px solid var(--border-color);
+  border-radius: 4px;
+  color: var(--text-primary);
+  font-size: 14px;
+}
+
+/* Buttons */
+.add-btn,
+.start-btn,
+.clear-btn {
+  padding: 8px 16px;
+  border-radius: 4px;
+  border: none;
+  font-size: 12px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: all 0.2s;
+}
+
+.add-btn {
+  background-color: var(--btn-secondary-bg);
+  color: var(--btn-secondary-text);
+  width: 100%;
+}
+
+.add-btn:hover:not(:disabled) {
+  background-color: var(--btn-secondary-hover);
+}
+
+.add-btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.start-btn {
+  background-color: var(--accent-color);
+  color: white;
+  width: 100%;
+  padding: 10px;
+  font-weight: 600;
+}
+
+.start-btn:hover:not(:disabled) {
+  opacity: 0.9;
+}
+
+.start-btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.stop-btn {
+  background: var(--error-color);
+  color: white;
+  flex: 1;
+}
+
+.stop-btn:hover {
+  filter: brightness(1.1);
+}
+
+.clear-btn {
+  background-color: transparent;
+  color: var(--text-secondary);
+  border: 1px solid var(--border-color);
+  width: 100%;
+}
+
+.clear-btn:hover {
+  background: var(--error-color);
+  color: white;
+  border-color: var(--error-color);
+}
+
+/* Tasks List */
+.tasks-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  max-height: 300px;
+  overflow-y: auto;
+}
+
+.task-item {
+  background-color: var(--layer-bg);
+  border: 1px solid var(--border-color);
+  border-radius: 4px;
+  padding: 8px;
+  cursor: pointer;
+  transition: all 0.2s;
+}
+
+.task-item:hover {
+  border-color: var(--accent-color);
+}
+
+.task-item.active {
+  border-color: var(--accent-color);
+  background: rgba(99, 102, 241, 0.1);
+}
+
+.task-item.running {
+  border-left: 3px solid var(--success-color);
+}
+
+.task-item.completed {
+  border-left: 3px solid var(--accent-color);
+}
+
+.task-item.error {
+  border-left: 3px solid var(--error-color);
+}
+
+.task-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 4px;
+}
+
+.status-indicator {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background-color: var(--text-tertiary);
+}
+
+.status-indicator.ready {
+  background-color: var(--text-secondary);
+}
+
+.status-indicator.running {
+  background-color: var(--accent-color);
+  animation: pulse 1.5s infinite;
+}
+
+.status-indicator.completed {
+  background-color: var(--success-color);
+}
+
+.status-indicator.error {
+  background-color: var(--error-color);
+}
+
+@keyframes pulse {
+  0% {
+    opacity: 1;
+  }
+
+  50% {
+    opacity: 0.5;
+  }
+
+  100% {
+    opacity: 1;
+  }
+}
+
+.task-name {
+  font-weight: 500;
+  font-size: 12px;
+  flex: 1;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.task-status {
+  font-size: 11px;
+  text-transform: uppercase;
+  color: var(--text-secondary);
+  padding: 2px 6px;
+  background: var(--bg-secondary);
+  border-radius: 4px;
+}
+
+.remove-btn {
+  background: none;
+  border: none;
+  color: var(--text-tertiary);
+  cursor: pointer;
+  padding: 0 4px;
+}
+
+.remove-btn:hover {
+  color: var(--error-color);
+}
+
+.task-prompt {
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* Terminals Grid */
+.terminals-section {
+  flex: 1;
+  min-height: 300px;
+}
+
+.terminals-section-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 12px;
+  gap: 12px;
+}
+
+.terminals-section-header h3 {
+  margin: 0;
+}
+
+.add-agent-btn {
+  padding: 6px 14px;
+  background: var(--accent-color);
+  color: white;
+  border: none;
+  border-radius: 6px;
+  font-size: 12px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: all 0.2s;
+}
+
+.add-agent-btn:hover {
+  background: var(--accent-hover);
+  filter: brightness(1.05);
+}
+
+.terminals-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(400px, 1fr));
+  gap: 12px;
+  max-height: 400px;
+  overflow-y: auto;
+}
+
+.terminal-container {
+  background: var(--bg-tertiary);
+  border-radius: 6px;
+  border: 1px solid var(--border-color);
+  overflow: hidden;
+}
+
+.terminal-container.active {
+  border-color: var(--accent-color);
+}
+
+.terminal-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 12px;
+  background: var(--bg-secondary);
+  border-bottom: 1px solid var(--border-color);
+  font-size: 12px;
+  font-weight: 500;
+}
+
+.status-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--text-secondary);
+}
+
+.status-dot.running {
+  background: var(--success-color);
+  animation: pulse 1.5s infinite;
+}
+
+.status-dot.completed {
+  background: var(--accent-color);
+}
+
+.terminal-view {
+  height: 250px;
+  padding: 8px;
+}
+
+/* Control Buttons */
+.automation-controls {
+  display: flex;
+  gap: 12px;
+  padding: 16px;
+  border-top: 1px solid var(--border-color);
+  background: var(--bg-secondary);
+}
+
+/* Scrollbar */
+.automation-content::-webkit-scrollbar,
+.tasks-list::-webkit-scrollbar,
+.terminals-grid::-webkit-scrollbar {
+  width: 8px;
+}
+
+.automation-content::-webkit-scrollbar-track,
+.tasks-list::-webkit-scrollbar-track,
+.terminals-grid::-webkit-scrollbar-track {
+  background: var(--bg-primary);
+}
+
+.automation-content::-webkit-scrollbar-thumb,
+.tasks-list::-webkit-scrollbar-thumb,
+.terminals-grid::-webkit-scrollbar-thumb {
+  background: var(--border-color);
+  border-radius: 4px;
+}
+
+.automation-content::-webkit-scrollbar-thumb:hover,
+.tasks-list::-webkit-scrollbar-thumb:hover,
+.terminals-grid::-webkit-scrollbar-thumb:hover {
+  background: var(--text-secondary);
+}

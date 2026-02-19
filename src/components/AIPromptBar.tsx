@@ -45,7 +45,7 @@ export function AIPromptBar({ onSubmit, currentProvider, currentModel, disabled 
                     {isAIMode ? (
                         <span className="ai-indicator">AI</span>
                     ) : (
-                        <span className="shell-indicator">❯</span>
+                        <span className="shell-indicator">&gt;</span>
                     )}
                 </div>
 
@@ -74,7 +74,7 @@ export function AIPromptBar({ onSubmit, currentProvider, currentModel, disabled 
                         disabled={!input.trim() || disabled}
                     >
                         {isAIMode ? "Ask AI" : "Run"}
-                        <span className="shortcut">⏎</span>
+                        <span className="shortcut">Enter</span>
                     </button>
                 </div>
             </form>
@@ -84,7 +84,7 @@ export function AIPromptBar({ onSubmit, currentProvider, currentModel, disabled 
                     <kbd>#</kbd> AI mode
                 </span>
                 <span className="hint">
-                    <kbd>↑</kbd><kbd>↓</kbd> History
+                    <kbd>Up</kbd><kbd>Down</kbd> History
                 </span>
                 <span className="hint">
                     <kbd>Esc</kbd> Clear

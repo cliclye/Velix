@@ -6,7 +6,28 @@
       "Bash(npm install:*)",
       "Bash(npm run build:*)",
       "Bash(npm run tauri:*)",
-      "Bash(cargo build:*)"
+      "Bash(cargo build:*)",
+      "Bash(lsof:*)",
+      "Bash(kill:*)",
+      "Bash(xargs kill:*)",
+      "Bash(npx tsc:*)",
+      "Bash(pkill:*)",
+      "Bash(npm run dev:*)",
+      "Bash(echo:*)",
+      "Bash(open:*)",
+      "Bash(find:*)",
+      "Bash(npx vite:*)",
+      "Bash(du:*)",
+      "Bash(ls:*)",
+      "Bash(grep:*)",
+      "WebSearch",
+      "Bash(cargo check:*)",
+      "WebFetch(domain:opencode.ai)",
+      "WebFetch(domain:platform.minimax.io)",
+      "WebFetch(domain:www.digitalapplied.com)",
+      "Bash(git submodule:*)",
+      "Bash(git rm:*)",
+      "Bash(git add:*)"
     ]
   }
 }

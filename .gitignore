@@ -22,3 +22,22 @@ dist-ssr
 *.njsproj
 *.sln
 *.sw?
+
+# Rust/Tauri build artifacts
+src-tauri/target/
+target/
+Cargo.lock
+
+# Test files (can be removed if not needed)
+*.test.js
+test-*.js
+*-test.js
+ai-diagnostic.js
+direct-api-test.js
+set-api-key.js
+test-ai-context.js
+test-ai.js
+test-detection.js
+test-file-context-rust.js
+test-rust-ai.js
+ai-file-context-demo.js

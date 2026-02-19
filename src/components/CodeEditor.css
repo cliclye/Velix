@@ -5,6 +5,10 @@
     background: var(--bg-code);
 }
 
+.app.dark .code-editor {
+    background: linear-gradient(180deg, #0a0e14 0%, #080b10 100%);
+}
+
 .editor-content {
     flex: 1;
     position: relative;
@@ -18,45 +22,74 @@
     text-align: right;
     user-select: none;
     border-right: 1px solid var(--border-light);
-    min-width: 50px;
+    min-width: 54px;
     overflow: hidden;
 }
 
+.app.dark .line-numbers {
+    background: rgba(10, 14, 20, 0.6);
+    border-right-color: rgba(35, 45, 59, 0.6);
+}
+
 .line-number {
-    font-family: var(--font-mono);
+    font-family: 'JetBrains Mono', 'Fira Code', monospace;
     font-size: 12px;
     line-height: 1.6;
     color: var(--text-hint);
-    padding: 0 12px;
+    padding: 0 14px;
+    transition: color 0.15s ease;
+}
+
+.line-number:hover {
+    color: var(--text-muted);
 }
 
 .code-input {
     flex: 1;
     border: none;
     resize: none;
-    padding: 16px 20px;
-    font-family: var(--font-mono);
+    padding: 16px 24px;
+    font-family: 'JetBrains Mono', 'Fira Code', monospace;
     font-size: 13px;
     line-height: 1.6;
     color: var(--text-primary);
-    background: var(--bg-code);
+    background: transparent;
     outline: none;
-    tab-size: 4;
+    caret-color: #56d4dd;
+}
+
+.app.light .code-input {
+    caret-color: #0891b2;
+}
+
+.code-input::selection {
+    background: rgba(88, 166, 255, 0.25);
+}
+
+.app.light .code-input::selection {
+    background: rgba(2, 132, 199, 0.2);
 }
 
 .editor-status {
     display: flex;
     justify-content: space-between;
     align-items: center;
-    padding: 6px 12px;
+    padding: 8px 16px;
     background: var(--bg-sidebar);
     border-top: 1px solid var(--border-light);
     font-size: 11px;
+    font-family: 'JetBrains Mono', 'Fira Code', monospace;
     color: var(--text-muted);
 }
 
+.app.dark .editor-status {
+    background: rgba(15, 20, 25, 0.9);
+    border-top-color: rgba(35, 45, 59, 0.6);
+}
+
 .file-path-status {
-    font-family: var(--font-mono);
+    font-family: 'JetBrains Mono', 'Fira Code', monospace;
+    color: var(--text-hint);
 }
 
 .editor-actions {
@@ -65,30 +98,49 @@
 }
 
 .editor-btn {
-    background: none;
+    background: var(--bg-hover);
     border: 1px solid var(--border-default);
-    padding: 3px 10px;
-    border-radius: 4px;
+    padding: 5px 14px;
+    border-radius: 6px;
     font-size: 11px;
+    font-family: 'JetBrains Mono', 'Fira Code', monospace;
+    font-weight: 500;
     color: var(--text-secondary);
     cursor: pointer;
+    transition: all 0.2s ease;
 }
 
 .editor-btn:hover {
-    background: var(--bg-primary);
+    background: rgba(88, 166, 255, 0.1);
+    border-color: rgba(88, 166, 255, 0.3);
+    color: #58a6ff;
+}
+
+.app.light .editor-btn:hover {
+    background: rgba(2, 132, 199, 0.08);
+    border-color: rgba(2, 132, 199, 0.25);
+    color: #0284c7;
 }
 
 .editor-btn.primary {
-    background: var(--accent-blue);
-    border-color: var(--accent-blue);
+    background: linear-gradient(135deg, #58a6ff 0%, #bc8cff 100%);
+    border-color: transparent;
     color: white;
+    box-shadow: 0 2px 8px rgba(88, 166, 255, 0.3);
 }
 
 .editor-btn.primary:hover {
-    background: #0055aa;
+    transform: translateY(-1px);
+    box-shadow: 0 4px 12px rgba(88, 166, 255, 0.4);
+}
+
+.app.light .editor-btn.primary {
+    background: linear-gradient(135deg, #0284c7 0%, #7c3aed 100%);
+    box-shadow: 0 2px 8px rgba(2, 132, 199, 0.25);
 }
 
 .editor-btn:disabled {
-    opacity: 0.5;
+    opacity: 0.4;
     cursor: not-allowed;
+    transform: none;
 }

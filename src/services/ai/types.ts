@@ -1,6 +1,6 @@
 // AI Provider types and interfaces
 
-export type ProviderID = 'claude' | 'chatgpt' | 'gemini' | 'glm4';
+export type ProviderID = 'claude' | 'chatgpt' | 'gemini' | 'glm4' | 'minimax' | 'zen' | 'kimi' | 'deepseek' | 'groq';
 
 export interface AIProvider {
     id: ProviderID;
@@ -37,31 +37,66 @@ export interface AIProviderClient {
     explainError(command: string, error: string): Promise<string>;
 }
 
+export interface FileContext {
+    path: string;
+    language: string;
+    content: string;
+}
+
 export interface ChatOptions {
     model?: string;
     maxTokens?: number;
     temperature?: number;
+    stream?: boolean;
+    onStream?: (chunk: string) => void;
+    fileContext?: FileContext;
+    projectContents?: Record<string, string>;
 }
 
 export const PROVIDERS: AIProvider[] = [
     {
         id: 'claude',
         name: 'Claude (Anthropic)',
-        models: ['claude-3-5-sonnet-20241022', 'claude-3-haiku-20240307', 'claude-3-opus-20240229'],
+        models: ['claude-sonnet-4-5', 'claude-opus-4-6', 'claude-haiku-4-5'],
     },
     {
         id: 'chatgpt',
         name: 'ChatGPT (OpenAI)',
-        models: ['gpt-4o', 'gpt-4-turbo', 'gpt-3.5-turbo'],
+        models: ['gpt-4o', 'gpt-4-turbo', 'gpt-3.5-turbo', 'o3', 'o4-mini'],
     },
     {
         id: 'gemini',
         name: 'Gemini (Google)',
-        models: ['gemini-1.5-pro', 'gemini-1.5-flash', 'gemini-pro'],
+        models: ['gemini-2.5-pro', 'gemini-2.0-flash', 'gemini-1.5-pro', 'gemini-1.5-flash'],
     },
     {
         id: 'glm4',
-        name: 'GLM-4 (Zhipu AI)',
-        models: ['glm-4', 'glm-4-flash', 'glm-4-air'],
+        name: 'GLM (Z.AI Coding Plan)',
+        models: ['glm-4.7', 'glm-4.5', 'glm-4-flash'],
+    },
+    {
+        id: 'minimax',
+        name: 'MiniMax',
+        models: ['MiniMax-M2.5', 'MiniMax-M2.1'],
+    },
+    {
+        id: 'zen',
+        name: 'OpenCode Zen (Free Models)',
+        models: ['glm-5-free', 'minimax-m2.5-free', 'kimi-k2.5-free', 'big-pickle'],
+    },
+    {
+        id: 'kimi',
+        name: 'Kimi (Moonshot AI)',
+        models: ['kimi-k2', 'moonshot-v1-32k', 'moonshot-v1-128k'],
+    },
+    {
+        id: 'deepseek',
+        name: 'DeepSeek',
+        models: ['deepseek-chat', 'deepseek-reasoner'],
+    },
+    {
+        id: 'groq',
+        name: 'Groq (Fast Inference)',
+        models: ['llama-3.3-70b-versatile', 'llama-3.1-8b-instant', 'mixtral-8x7b-32768', 'gemma2-9b-it'],
     },
 ];

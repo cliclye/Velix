@@ -105,7 +105,7 @@ export function CodeAnalysisPanel({ filePath, fileContent, onClose }: CodeAnalys
         <div className="code-analysis-panel">
             <div className="analysis-header">
                 <div className="analysis-title">
-                    <span className="file-icon">📄</span>
+                    <span className="file-icon">F</span>
                     <span className="file-name">{filePath.split('/').pop()}</span>
                 </div>
                 <div className="analysis-tabs">
@@ -155,7 +155,7 @@ export function CodeAnalysisPanel({ filePath, fileContent, onClose }: CodeAnalys
                         <div className="chat-messages">
                             {chatMessages.length === 0 ? (
                                 <div className="chat-empty">
-                                    <div className="chat-icon">💬</div>
+                                    <div className="chat-icon">[C]</div>
                                     <h3>Ask questions about your code</h3>
                                     <p>Get specific answers about functions, classes, architecture, or any aspect of this file.</p>
                                 </div>

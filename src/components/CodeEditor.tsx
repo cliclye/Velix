@@ -8,9 +8,10 @@ interface CodeEditorProps {
     onContentChange?: (content: string) => void;
     onSave: () => void;
     onClose?: () => void;
+    tabSize?: number;
 }
 
-export function CodeEditor({ filePath, content, onContentChange, onSave }: CodeEditorProps) {
+export function CodeEditor({ filePath, content, onContentChange, onSave, tabSize = 4 }: CodeEditorProps) {
     const [isSaving, setIsSaving] = useState(false);
 
     const handleKeyDown = async (e: React.KeyboardEvent) => {
@@ -51,6 +52,7 @@ export function CodeEditor({ filePath, content, onContentChange, onSave }: CodeE
                     onChange={handleChange}
                     onKeyDown={handleKeyDown}
                     spellCheck={false}
+                    style={{ tabSize }}
                 />
             </div>
             <div className="editor-status">

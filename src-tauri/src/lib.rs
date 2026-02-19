@@ -1,12 +1,20 @@
 use portable_pty::{native_pty_system, CommandBuilder, PtyPair, PtySize};
 use serde::Serialize;
 use std::collections::HashMap;
+use std::fs;
 use std::io::{Read, Write as IoWrite};
-use std::path::Path;
-use std::process::Command;
+use std::path::{Path, PathBuf};
+use std::process::{Child, Command};
 use std::sync::{Arc, Mutex};
 use std::thread;
-use tauri::{AppHandle, Emitter, State};
+use tauri::{AppHandle, Emitter, Manager, State};
+
+const SETTINGS_FILENAME: &str = "settings.json";
+
+#[derive(Serialize, serde::Deserialize, Default)]
+struct AppSettings {
+    api_keys: HashMap<String, String>,
+}
 
 // PTY session management
 struct PtySession {
@@ -16,9 +24,52 @@ struct PtySession {
 
 // Simple in-memory storage for API keys and shell state
 struct AppState {
-    api_keys: Mutex<HashMap<String, String>>,
+    settings: Mutex<AppSettings>,
     shell_cwd: Mutex<String>,
     pty_sessions: Mutex<HashMap<String, Arc<Mutex<PtySession>>>>,
+    app_dir: Mutex<Option<PathBuf>>,
+    /// Handle to the opencode server child process
+    opencode_process: Mutex<Option<Child>>,
+}
+
+impl AppState {
+    fn new(app: &AppHandle) -> Self {
+        let app_dir = app.path().app_config_dir().ok();
+        let mut settings = AppSettings::default();
+
+        if let Some(dir) = &app_dir {
+            if let Ok(_) = fs::create_dir_all(dir) {
+                let settings_path = dir.join(SETTINGS_FILENAME);
+                if settings_path.exists() {
+                    if let Ok(content) = fs::read_to_string(&settings_path) {
+                        if let Ok(loaded) = serde_json::from_str(&content) {
+                            settings = loaded;
+                        }
+                    }
+                }
+            }
+        }
+
+        Self {
+            settings: Mutex::new(settings),
+            shell_cwd: Mutex::new(dirs_or_home()),
+            pty_sessions: Mutex::new(HashMap::new()),
+            app_dir: Mutex::new(app_dir),
+            opencode_process: Mutex::new(None),
+        }
+    }
+
+    fn save_settings(&self) -> Result<(), String> {
+        let settings = self.settings.lock().map_err(|e| e.to_string())?;
+        let app_dir = self.app_dir.lock().map_err(|e| e.to_string())?;
+
+        if let Some(dir) = &*app_dir {
+            let settings_path = dir.join(SETTINGS_FILENAME);
+            let content = serde_json::to_string_pretty(&*settings).map_err(|e| e.to_string())?;
+            fs::write(settings_path, content).map_err(|e| e.to_string())?;
+        }
+        Ok(())
+    }
 }
 
 #[derive(Serialize)]
@@ -108,7 +159,9 @@ fn pty_create(
         pixel_height: 0,
     };
 
-    let pair = pty_system.openpty(size).map_err(|e| format!("Failed to open PTY: {}", e))?;
+    let pair = pty_system
+        .openpty(size)
+        .map_err(|e| format!("Failed to open PTY: {}", e))?;
 
     // Get the shell path - use user's default shell or fallback to zsh
     let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/zsh".to_string());
@@ -127,22 +180,25 @@ fn pty_create(
     cmd.env("HOME", dirs_or_home());
 
     // Spawn the shell in the PTY
-    let mut child = pair.slave.spawn_command(cmd)
+    let mut child = pair
+        .slave
+        .spawn_command(cmd)
         .map_err(|e| format!("Failed to spawn shell: {}", e))?;
 
     // Get reader for output
-    let mut reader = pair.master.try_clone_reader()
+    let mut reader = pair
+        .master
+        .try_clone_reader()
         .map_err(|e| format!("Failed to clone reader: {}", e))?;
 
     // Get writer for input
-    let writer = pair.master.take_writer()
+    let writer = pair
+        .master
+        .take_writer()
         .map_err(|e| format!("Failed to take writer: {}", e))?;
 
     // Store the session
-    let session = Arc::new(Mutex::new(PtySession {
-        pair,
-        writer,
-    }));
+    let session = Arc::new(Mutex::new(PtySession { pair, writer }));
 
     {
         let mut sessions = state.pty_sessions.lock().map_err(|e| e.to_string())?;
@@ -162,10 +218,13 @@ fn pty_create(
                 }
                 Ok(n) => {
                     let data = String::from_utf8_lossy(&buffer[..n]).to_string();
-                    let _ = app_handle.emit("pty-output", TerminalOutput {
-                        session_id: sid.clone(),
-                        data,
-                    });
+                    let _ = app_handle.emit(
+                        "pty-output",
+                        TerminalOutput {
+                            session_id: sid.clone(),
+                            data,
+                        },
+                    );
                 }
                 Err(e) => {
                     eprintln!("PTY read error: {}", e);
@@ -175,34 +234,39 @@ fn pty_create(
         }
 
         // Wait for child to exit and get exit code
-        let exit_code = child.wait().ok().and_then(|s| {
-            if s.success() { Some(0) } else { Some(1) }
-        });
+        let exit_code = child
+            .wait()
+            .ok()
+            .and_then(|s| if s.success() { Some(0) } else { Some(1) });
 
-        let _ = app_handle.emit("pty-exit", TerminalExit {
-            session_id: sid,
-            exit_code,
-        });
+        let _ = app_handle.emit(
+            "pty-exit",
+            TerminalExit {
+                session_id: sid,
+                exit_code,
+            },
+        );
     });
 
     Ok(())
 }
 
 #[tauri::command]
-fn pty_write(
-    session_id: String,
-    data: String,
-    state: State<'_, AppState>,
-) -> Result<(), String> {
+fn pty_write(session_id: String, data: String, state: State<'_, AppState>) -> Result<(), String> {
     let sessions = state.pty_sessions.lock().map_err(|e| e.to_string())?;
 
-    let session = sessions.get(&session_id)
+    let session = sessions
+        .get(&session_id)
         .ok_or_else(|| format!("PTY session not found: {}", session_id))?;
 
     let mut session_guard = session.lock().map_err(|e| e.to_string())?;
-    session_guard.writer.write_all(data.as_bytes())
+    session_guard
+        .writer
+        .write_all(data.as_bytes())
         .map_err(|e| format!("Failed to write to PTY: {}", e))?;
-    session_guard.writer.flush()
+    session_guard
+        .writer
+        .flush()
         .map_err(|e| format!("Failed to flush PTY: {}", e))?;
 
     Ok(())
@@ -217,25 +281,27 @@ fn pty_resize(
 ) -> Result<(), String> {
     let sessions = state.pty_sessions.lock().map_err(|e| e.to_string())?;
 
-    let session = sessions.get(&session_id)
+    let session = sessions
+        .get(&session_id)
         .ok_or_else(|| format!("PTY session not found: {}", session_id))?;
 
     let session_guard = session.lock().map_err(|e| e.to_string())?;
-    session_guard.pair.master.resize(PtySize {
-        rows,
-        cols,
-        pixel_width: 0,
-        pixel_height: 0,
-    }).map_err(|e| format!("Failed to resize PTY: {}", e))?;
+    session_guard
+        .pair
+        .master
+        .resize(PtySize {
+            rows,
+            cols,
+            pixel_width: 0,
+            pixel_height: 0,
+        })
+        .map_err(|e| format!("Failed to resize PTY: {}", e))?;
 
     Ok(())
 }
 
 #[tauri::command]
-fn pty_kill(
-    session_id: String,
-    state: State<'_, AppState>,
-) -> Result<(), String> {
+fn pty_kill(session_id: String, state: State<'_, AppState>) -> Result<(), String> {
     let mut sessions = state.pty_sessions.lock().map_err(|e| e.to_string())?;
 
     if sessions.remove(&session_id).is_some() {
@@ -364,6 +430,81 @@ fn dirs_or_home() -> String {
     std::env::var("HOME").unwrap_or_else(|_| "/".to_string())
 }
 
+/// Read all source files from a project directory. Returns relative_path -> content.
+#[tauri::command]
+fn read_project_source_files(directory: String) -> Result<std::collections::HashMap<String, String>, String> {
+    use std::fs;
+
+    let dir_path = std::path::Path::new(&directory);
+    if !dir_path.exists() || !dir_path.is_dir() {
+        return Err(format!("Not a valid directory: {}", directory));
+    }
+
+    // Check if this looks like a project (has common project files)
+    let project_indicators = ["package.json", "Cargo.toml", "pyproject.toml", "go.mod", "pom.xml",
+        "build.gradle", "Makefile", "CMakeLists.txt", ".git", "requirements.txt"];
+    let is_project = project_indicators.iter().any(|f| dir_path.join(f).exists());
+    if !is_project {
+        return Err("Directory does not appear to be a project (no package.json, Cargo.toml, etc.)".to_string());
+    }
+
+    let source_extensions = ["ts", "tsx", "js", "jsx", "css", "html", "json", "rs", "toml",
+        "py", "go", "java", "c", "cpp", "h", "swift", "yaml", "yml", "sh", "sql", "md"];
+    let skip_dirs = ["node_modules", ".git", "target", "dist", "build", ".next",
+        ".cache", "__pycache__", ".claude", "coverage", ".turbo"];
+
+    let mut contents = std::collections::HashMap::new();
+    let mut total_size: usize = 0;
+    let max_total_size: usize = 80_000;
+
+    fn walk_dir(
+        dir: &std::path::Path,
+        root: &std::path::Path,
+        contents: &mut std::collections::HashMap<String, String>,
+        total_size: &mut usize,
+        max_total_size: usize,
+        source_extensions: &[&str],
+        skip_dirs: &[&str],
+    ) {
+        if *total_size >= max_total_size { return; }
+
+        let entries = match fs::read_dir(dir) {
+            Ok(e) => e,
+            Err(_) => return,
+        };
+
+        for entry in entries.flatten() {
+            if *total_size >= max_total_size { break; }
+
+            let path = entry.path();
+            let name = entry.file_name().to_string_lossy().to_string();
+
+            if path.is_dir() {
+                if skip_dirs.contains(&name.as_str()) || name.starts_with('.') {
+                    continue;
+                }
+                walk_dir(&path, root, contents, total_size, max_total_size, source_extensions, skip_dirs);
+            } else if path.is_file() {
+                let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
+                if !source_extensions.contains(&ext) { continue; }
+
+                if let Ok(content) = fs::read_to_string(&path) {
+                    if content.len() > 10_000 { continue; } // Skip large files
+                    let relative = path.strip_prefix(root)
+                        .map(|p| p.to_string_lossy().to_string())
+                        .unwrap_or_else(|_| name);
+                    *total_size += content.len();
+                    contents.insert(relative, content);
+                }
+            }
+        }
+    }
+
+    walk_dir(dir_path, dir_path, &mut contents, &mut total_size, max_total_size, &source_extensions, &skip_dirs);
+
+    Ok(contents)
+}
+
 #[tauri::command]
 fn greet(name: &str) -> String {
     format!("Hello, {}! You've been greeted from Rust!", name)
@@ -371,15 +512,22 @@ fn greet(name: &str) -> String {
 
 #[tauri::command]
 fn save_api_key(provider: &str, key: &str, state: State<'_, AppState>) -> Result<(), String> {
-    let mut keys = state.api_keys.lock().map_err(|e| e.to_string())?;
-    keys.insert(provider.to_string(), key.to_string());
+    {
+        let mut settings = state.settings.lock().map_err(|e| e.to_string())?;
+        settings
+            .api_keys
+            .insert(provider.to_string(), key.to_string());
+    }
+    state.save_settings()?;
     Ok(())
 }
 
 #[tauri::command]
 fn get_api_key(provider: &str, state: State<'_, AppState>) -> Result<String, String> {
-    let keys = state.api_keys.lock().map_err(|e| e.to_string())?;
-    keys.get(provider)
+    let settings = state.settings.lock().map_err(|e| e.to_string())?;
+    settings
+        .api_keys
+        .get(provider)
         .cloned()
         .ok_or_else(|| format!("No API key found for provider: {}", provider))
 }
@@ -633,17 +781,545 @@ fn get_git_remote_info(repo_path: &str) -> Result<GitRemoteInfo, String> {
     })
 }
 
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct SearchMatch {
+    file: String,
+    line: usize,
+    column: usize,
+    text: String,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct GitFileStatus {
+    path: String,
+    status: String,
+    staged: bool,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct GitStatusResult {
+    branch: String,
+    files: Vec<GitFileStatus>,
+    ahead: usize,
+    behind: usize,
+}
+
+// Get all files in a directory recursively
+fn walk_directory(dir: &Path, base_path: &Path, files: &mut Vec<String>) -> std::io::Result<()> {
+    if dir.is_dir() {
+        for entry in fs::read_dir(dir)? {
+            let entry = entry?;
+            let path = entry.path();
+
+            // Skip common ignore patterns
+            if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
+                if name.starts_with('.')
+                    || name == "node_modules"
+                    || name == "target"
+                    || name == "dist"
+                    || name == "build"
+                    || name == "__pycache__"
+                {
+                    continue;
+                }
+            }
+
+            if path.is_dir() {
+                walk_directory(&path, base_path, files)?;
+            } else {
+                if let Ok(relative) = path.strip_prefix(base_path) {
+                    if let Some(path_str) = relative.to_str() {
+                        files.push(path_str.to_string());
+                    }
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+// Search files for a pattern
+fn search_in_directory(
+    dir: &Path,
+    base_path: &Path,
+    pattern: &str,
+    case_sensitive: bool,
+    matches: &mut Vec<SearchMatch>,
+    max_results: usize,
+) -> std::io::Result<()> {
+    if matches.len() >= max_results {
+        return Ok(());
+    }
+
+    if dir.is_dir() {
+        for entry in fs::read_dir(dir)? {
+            let entry = entry?;
+            let path = entry.path();
+
+            // Skip common ignore patterns
+            if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
+                if name.starts_with('.')
+                    || name == "node_modules"
+                    || name == "target"
+                    || name == "dist"
+                    || name == "build"
+                    || name == "__pycache__"
+                {
+                    continue;
+                }
+            }
+
+            if path.is_dir() {
+                search_in_directory(
+                    &path,
+                    base_path,
+                    pattern,
+                    case_sensitive,
+                    matches,
+                    max_results,
+                )?;
+            } else {
+                // Try to read as text file
+                if let Ok(content) = fs::read_to_string(&path) {
+                    let search_pattern = if case_sensitive {
+                        pattern.to_string()
+                    } else {
+                        pattern.to_lowercase()
+                    };
+
+                    for (line_num, line) in content.lines().enumerate() {
+                        let search_line = if case_sensitive {
+                            line.to_string()
+                        } else {
+                            line.to_lowercase()
+                        };
+
+                        if let Some(col) = search_line.find(&search_pattern) {
+                            if let Ok(relative) = path.strip_prefix(base_path) {
+                                if let Some(file_str) = relative.to_str() {
+                                    matches.push(SearchMatch {
+                                        file: file_str.to_string(),
+                                        line: line_num + 1,
+                                        column: col + 1,
+                                        text: line.to_string(),
+                                    });
+
+                                    if matches.len() >= max_results {
+                                        return Ok(());
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+#[tauri::command]
+fn get_all_files(directory: String) -> Result<Vec<String>, String> {
+    let base_path = PathBuf::from(&directory);
+    let mut files = Vec::new();
+
+    walk_directory(&base_path, &base_path, &mut files).map_err(|e| e.to_string())?;
+
+    Ok(files)
+}
+
+#[tauri::command]
+fn search_in_files(
+    directory: String,
+    pattern: String,
+    case_sensitive: Option<bool>,
+    max_results: Option<usize>,
+) -> Result<Vec<SearchMatch>, String> {
+    let base_path = PathBuf::from(&directory);
+    let mut matches = Vec::new();
+    let case_sensitive = case_sensitive.unwrap_or(false);
+    let max_results = max_results.unwrap_or(500);
+
+    search_in_directory(
+        &base_path,
+        &base_path,
+        &pattern,
+        case_sensitive,
+        &mut matches,
+        max_results,
+    )
+    .map_err(|e| e.to_string())?;
+
+    Ok(matches)
+}
+
+#[tauri::command]
+fn get_git_status(repo_path: &str) -> Result<GitStatusResult, String> {
+    let path = Path::new(repo_path);
+
+    // Get current branch
+    let branch_output = Command::new("git")
+        .args(&["rev-parse", "--abbrev-ref", "HEAD"])
+        .current_dir(path)
+        .output()
+        .map_err(|e| e.to_string())?;
+
+    let branch = if branch_output.status.success() {
+        String::from_utf8_lossy(&branch_output.stdout)
+            .trim()
+            .to_string()
+    } else {
+        "unknown".to_string()
+    };
+
+    // Get ahead/behind counts
+    let ahead_behind_output = Command::new("git")
+        .args(&["rev-list", "--left-right", "--count", "HEAD...@{u}"])
+        .current_dir(path)
+        .output();
+
+    let (ahead, behind) = if let Ok(output) = ahead_behind_output {
+        if output.status.success() {
+            let counts = String::from_utf8_lossy(&output.stdout);
+            let parts: Vec<&str> = counts.trim().split_whitespace().collect();
+            (
+                parts.get(0).and_then(|s| s.parse().ok()).unwrap_or(0),
+                parts.get(1).and_then(|s| s.parse().ok()).unwrap_or(0),
+            )
+        } else {
+            (0, 0)
+        }
+    } else {
+        (0, 0)
+    };
+
+    // Get file status
+    let status_output = Command::new("git")
+        .args(&["status", "--porcelain=v1"])
+        .current_dir(path)
+        .output()
+        .map_err(|e| e.to_string())?;
+
+    let mut files = Vec::new();
+    if status_output.status.success() {
+        let status_str = String::from_utf8_lossy(&status_output.stdout);
+        for line in status_str.lines() {
+            if line.len() < 4 {
+                continue;
+            }
+
+            let index_status = line.chars().nth(0).unwrap_or(' ');
+            let worktree_status = line.chars().nth(1).unwrap_or(' ');
+            let file_path = line[3..].to_string();
+
+            let (status, staged) = match (index_status, worktree_status) {
+                ('M', ' ') => ("modified".to_string(), true),
+                ('M', 'M') => ("modified".to_string(), false),
+                (' ', 'M') => ("modified".to_string(), false),
+                ('A', ' ') => ("added".to_string(), true),
+                ('A', 'M') => ("added".to_string(), false),
+                ('D', ' ') => ("deleted".to_string(), true),
+                (' ', 'D') => ("deleted".to_string(), false),
+                ('R', ' ') => ("renamed".to_string(), true),
+                ('?', '?') => ("untracked".to_string(), false),
+                _ => ("unknown".to_string(), false),
+            };
+
+            files.push(GitFileStatus {
+                path: file_path,
+                status,
+                staged,
+            });
+        }
+    }
+
+    Ok(GitStatusResult {
+        branch,
+        files,
+        ahead,
+        behind,
+    })
+}
+
+#[tauri::command]
+fn get_git_diff(repo_path: &str, file_path: &str, staged: bool) -> Result<String, String> {
+    let path = Path::new(repo_path);
+
+    let mut args = vec!["diff"];
+    if staged {
+        args.push("--cached");
+    }
+    args.push(file_path);
+
+    let output = Command::new("git")
+        .args(&args)
+        .current_dir(path)
+        .output()
+        .map_err(|e| e.to_string())?;
+
+    if output.status.success() {
+        Ok(String::from_utf8_lossy(&output.stdout).to_string())
+    } else {
+        Err(String::from_utf8_lossy(&output.stderr).to_string())
+    }
+}
+
+#[tauri::command]
+async fn ask_claude(prompt: String, state: tauri::State<'_, AppState>) -> Result<String, String> {
+    // Claude API integration - using current claude-sonnet-4-5 model
+    // Get API key from stored settings
+    let api_key = {
+        let settings = state.settings.lock().map_err(|e| e.to_string())?;
+        settings
+            .api_keys
+            .get("claude")
+            .cloned()
+            .ok_or_else(|| "No Claude API key found. Please configure it in Settings.".to_string())?
+    };
+
+    let client = reqwest::Client::new();
+
+    // Try to parse context from the prompt JSON
+    let request_body = if let Ok(context_data) = serde_json::from_str::<serde_json::Value>(&prompt) {
+        let user_prompt = context_data
+            .get("prompt")
+            .and_then(|p| p.as_str())
+            .unwrap_or(&prompt);
+
+        if let Some(project_files) = context_data.get("project_files").and_then(|v| v.as_object()) {
+            // Full project context
+            let mut project_snapshot = String::new();
+            for (file_path, content_val) in project_files {
+                if let Some(content) = content_val.as_str() {
+                    let ext = file_path.rsplit('.').next().unwrap_or("text");
+                    project_snapshot.push_str(&format!(
+                        "\n--- FILE: {} ---\n```{}\n{}\n```\n",
+                        file_path, ext, content
+                    ));
+                }
+            }
+
+            let system_message = format!(
+                "You are an AI coding assistant in a terminal/IDE called Velix. You have access to the user's ENTIRE project.\n\n\
+                FULL PROJECT SOURCE CODE:\n{}\n\n\
+                RULES:\n\
+                - When the user says 'optimize this' or 'fix this', analyze the entire project.\n\
+                - When you make changes, output EACH changed file like this:\n\n\
+                FILE: path/to/file.ext\n```language\n...full updated file content...\n```\n\n\
+                - Only output files you actually changed.\n\
+                - Be specific. Reference actual code.\n\
+                - Keep explanations brief.",
+                project_snapshot
+            );
+
+            serde_json::json!({
+                "model": "claude-sonnet-4-5",
+                "max_tokens": 8192,
+                "system": system_message,
+                "messages": [{"role": "user", "content": user_prompt}]
+            })
+        } else if let Some(file_context) = context_data.get("file_context") {
+            let fp = file_context.get("path").and_then(|v| v.as_str()).unwrap_or("");
+            let fl = file_context.get("language").and_then(|v| v.as_str()).unwrap_or("");
+            let fc = file_context.get("content").and_then(|v| v.as_str()).unwrap_or("");
+
+            let system_message = format!(
+                "You are an AI coding assistant. File: {}\n\n```{}\n{}\n```\n\nBe specific. Reference actual code.",
+                fp, fl, fc
+            );
+
+            serde_json::json!({
+                "model": "claude-sonnet-4-5",
+                "max_tokens": 4096,
+                "system": system_message,
+                "messages": [{"role": "user", "content": user_prompt}]
+            })
+        } else {
+            serde_json::json!({
+                "model": "claude-sonnet-4-5",
+                "max_tokens": 1024,
+                "messages": [{"role": "user", "content": user_prompt}]
+            })
+        }
+    } else {
+        serde_json::json!({
+            "model": "claude-sonnet-4-5",
+            "max_tokens": 1024,
+            "messages": [{"role": "user", "content": &prompt}]
+        })
+    };
+
+    let response = client
+        .post("https://api.anthropic.com/v1/messages")
+        .header("x-api-key", api_key)
+        .header("anthropic-version", "2023-06-01")
+        .header("Content-Type", "application/json")
+        .json(&request_body)
+        .send()
+        .await
+        .map_err(|e| format!("Failed to send request to Claude: {}", e))?;
+
+    if !response.status().is_success() {
+        let status = response.status();
+        let error_text = response.text().await.unwrap_or_default();
+        return Err(format!("Claude API error {}: {}", status, error_text));
+    }
+
+    let response_json: serde_json::Value = response
+        .json()
+        .await
+        .map_err(|e| format!("Failed to parse Claude response: {}", e))?;
+
+    let content = response_json
+        .get("content")
+        .and_then(|arr| arr.as_array())
+        .and_then(|arr| arr.first())
+        .and_then(|obj| obj.get("text"))
+        .and_then(|text| text.as_str())
+        .unwrap_or("No response from Claude");
+
+    Ok(content.to_string())
+}
+
+// ==================== OpenCode Server Management ====================
+
+/// Try to locate the `bun` executable in common paths.
+fn find_bun() -> Option<String> {
+    // Try PATH first
+    if let Ok(output) = Command::new("which").arg("bun").output() {
+        if output.status.success() {
+            let path = String::from_utf8_lossy(&output.stdout).trim().to_string();
+            if !path.is_empty() {
+                return Some(path);
+            }
+        }
+    }
+    // Common macOS / Linux locations
+    let candidates = [
+        "/usr/local/bin/bun",
+        "/opt/homebrew/bin/bun",
+    ];
+    let home = std::env::var("HOME").unwrap_or_default();
+    let home_bun = format!("{}/.bun/bin/bun", home);
+    let mut all: Vec<&str> = candidates.to_vec();
+    all.push(home_bun.as_str());
+    for path in all {
+        if Path::new(path).exists() {
+            return Some(path.to_string());
+        }
+    }
+    None
+}
+
+/// Try to find the velixcode/packages/opencode directory.
+/// In dev mode, searches relative to cwd. In production, falls back to the
+/// app's resource directory (where the bundled velixcode is placed).
+fn find_opencode_dir(app: &AppHandle) -> Option<PathBuf> {
+    // Dev: cwd is the Velix project root
+    if let Ok(cwd) = std::env::current_dir() {
+        let candidate = cwd.join("velixcode/packages/opencode");
+        if candidate.exists() {
+            return Some(candidate);
+        }
+        // Running from src-tauri/
+        if let Some(parent) = cwd.parent() {
+            let candidate2 = parent.join("velixcode/packages/opencode");
+            if candidate2.exists() {
+                return Some(candidate2);
+            }
+        }
+    }
+    // Production: look next to the app binary (resource dir)
+    if let Ok(resource_dir) = app.path().resource_dir() {
+        let candidate = resource_dir.join("velixcode/packages/opencode");
+        if candidate.exists() {
+            return Some(candidate);
+        }
+    }
+    None
+}
+
+/// Start the opencode server (velixcode engine) as a child process.
+/// The server listens on http://localhost:4096.
+#[tauri::command]
+async fn start_opencode_server(app: AppHandle, state: State<'_, AppState>) -> Result<String, String> {
+    // Check if already running
+    {
+        let proc = state.opencode_process.lock().map_err(|e| e.to_string())?;
+        if proc.is_some() {
+            return Ok("http://localhost:4096".to_string());
+        }
+    }
+
+    let bun = find_bun().ok_or_else(|| {
+        "bun runtime not found. Please install bun (https://bun.sh) to use the AI engine.".to_string()
+    })?;
+
+    let opencode_dir = find_opencode_dir(&app).ok_or_else(|| {
+        "velixcode/packages/opencode directory not found. Make sure velixcode is in the Velix project root.".to_string()
+    })?;
+
+    let entry_point = opencode_dir.join("src/index.ts");
+    if !entry_point.exists() {
+        return Err(format!(
+            "opencode entry point not found at: {}",
+            entry_point.display()
+        ));
+    }
+
+    let child = Command::new(&bun)
+        .arg("run")
+        .arg("--conditions=browser")
+        .arg(entry_point.to_str().unwrap_or("src/index.ts"))
+        .arg("serve")
+        .arg("--port")
+        .arg("4096")
+        .current_dir(&opencode_dir)
+        .env("OPENCODE_SERVER_PORT", "4096")
+        // Pipe stdout/stderr so they don't clutter the terminal
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .map_err(|e| format!("Failed to start opencode server: {}", e))?;
+
+    {
+        let mut proc = state.opencode_process.lock().map_err(|e| e.to_string())?;
+        *proc = Some(child);
+    }
+
+    Ok("http://localhost:4096".to_string())
+}
+
+/// Stop the opencode server if it is running.
+#[tauri::command]
+async fn stop_opencode_server(state: State<'_, AppState>) -> Result<(), String> {
+    let mut proc = state.opencode_process.lock().map_err(|e| e.to_string())?;
+    if let Some(mut child) = proc.take() {
+        let _ = child.kill();
+    }
+    Ok(())
+}
+
+/// Get the URL of the opencode server.
+#[tauri::command]
+fn get_opencode_url() -> String {
+    "http://localhost:4096".to_string()
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    let home = dirs_or_home();
     tauri::Builder::default()
-        .manage(AppState {
-            api_keys: Mutex::new(HashMap::new()),
-            shell_cwd: Mutex::new(home),
-            pty_sessions: Mutex::new(HashMap::new()),
+        .setup(|app| {
+            let state = AppState::new(app.handle());
+            app.manage(state);
+            Ok(())
         })
         .plugin(tauri_plugin_fs::init())
         .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_http::init())
         .plugin(tauri_plugin_opener::init())
         .invoke_handler(tauri::generate_handler![
             greet,
@@ -656,10 +1332,19 @@ pub fn run() {
             get_file_evolution,
             find_repo_root,
             get_git_remote_info,
+            get_all_files,
+            search_in_files,
+            get_git_status,
+            get_git_diff,
             pty_create,
             pty_write,
             pty_resize,
-            pty_kill
+            pty_kill,
+            ask_claude,
+            read_project_source_files,
+            start_opencode_server,
+            stop_opencode_server,
+            get_opencode_url
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

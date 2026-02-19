@@ -13,6 +13,8 @@
     "fs:default",
     "fs:read-all",
     "fs:write-all",
-    "fs:scope-home-recursive"
+    "fs:scope-home-recursive",
+    "http:default",
+    "http:allow-fetch"
   ]
 }

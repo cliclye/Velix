@@ -43,7 +43,7 @@ export function CommandBlock({ command, output, timestamp, isError, onAskAI }: C
                         onClick={handleCopy}
                         title="Copy"
                     >
-                        {copied ? "✓" : "📋"}
+                        {copied ? "OK" : "Copy"}
                     </button>
                     {isError && onAskAI && (
                         <button
@@ -51,14 +51,14 @@ export function CommandBlock({ command, output, timestamp, isError, onAskAI }: C
                             onClick={() => onAskAI(command, output)}
                             title="Ask AI about this error"
                         >
-                            🤖 Ask AI
+                            Ask AI
                         </button>
                     )}
                 </div>
             </div>
 
             <div className="block-command">
-                <span className="cmd-prompt">❯</span>
+                <span className="cmd-prompt">&gt;</span>
                 <span className="cmd-text">{command}</span>
             </div>
 
@@ -73,19 +73,19 @@ export function CommandBlock({ command, output, timestamp, isError, onAskAI }: C
                     <div className="menu-overlay" onClick={() => setShowMenu(false)} />
                     <div className="context-menu">
                         <button onClick={() => { handleCopy(); setShowMenu(false); }}>
-                            📋 Copy Block
+                            Copy Block
                         </button>
                         <button onClick={() => { navigator.clipboard.writeText(command); setShowMenu(false); }}>
-                            📝 Copy Command
+                            Copy Command
                         </button>
                         <button onClick={() => { navigator.clipboard.writeText(output); setShowMenu(false); }}>
-                            📄 Copy Output
+                            Copy Output
                         </button>
                         {isError && onAskAI && (
                             <>
                                 <hr />
                                 <button className="ai-option" onClick={() => { onAskAI(command, output); setShowMenu(false); }}>
-                                    🤖 Ask AI to Explain
+                                    Ask AI to Explain
                                 </button>
                             </>
                         )}
