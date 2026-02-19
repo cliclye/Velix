@@ -14,11 +14,11 @@
 }
 
 .terminal-wrapper.dark {
-  background: linear-gradient(180deg, #0a0a0a 0%, #050505 100%);
+  background: #0d1117;
 }
 
 .terminal-wrapper.light {
-  background: linear-gradient(180deg, #F5F5F0 0%, #EAEAE5 100%);
+  background: #ffffff;
 }
 
 /* ========== SIMPLE HEADER ========== */
@@ -103,6 +103,14 @@
 
 .terminal-wrapper .xterm-viewport {
   overflow-y: auto !important;
+}
+
+.terminal-wrapper.dark .xterm-viewport {
+  background-color: #0d1117 !important;
+}
+
+.terminal-wrapper.light .xterm-viewport {
+  background-color: #ffffff !important;
 }
 
 .terminal-wrapper .xterm-screen {
