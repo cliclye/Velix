@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { writeTextFile } from "@tauri-apps/plugin-fs";
+import { writeTextFile } from "../platform/native";
 import "./CodeEditor.css";
 
 interface CodeEditorProps {

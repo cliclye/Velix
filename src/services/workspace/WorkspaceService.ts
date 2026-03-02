@@ -1,5 +1,4 @@
-import { invoke } from '@tauri-apps/api/core';
-import { readTextFile } from '@tauri-apps/plugin-fs';
+import { invoke, readTextFile } from '../../platform/native';
 
 /**
  * Represents a node in the project file tree.

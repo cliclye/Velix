@@ -1,14 +1,26 @@
 import { useEffect, useRef, useCallback, useState, forwardRef, useImperativeHandle } from "react";
 import { Terminal } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
-import { invoke } from "@tauri-apps/api/core";
-import { listen, UnlistenFn } from "@tauri-apps/api/event";
-import { writeTextFile } from "@tauri-apps/plugin-fs";
+import {
+  invoke,
+  listen,
+  type UnlistenFn,
+  writeTextFile,
+  readTextFile,
+  remove,
+  isPermissionGranted,
+  requestPermission,
+  sendNotification,
+} from "../platform/native";
+import { DiffPanel } from "./DiffPanel";
+import type { FileDiff, PendingFileChange } from "./DiffPanel";
+import { computeLineDiff } from "../utils/diff";
 import "@xterm/xterm/css/xterm.css";
 import "./TerminalBlock.css";
 import { aiService } from "../services/ai/AIService";
 import { ChatMessage, PROVIDERS } from "../services/ai/types";
 import { workspaceService, WorkspaceContext } from "../services/workspace";
+import { AIChat, AIChatMessage } from "./AIChat";
 
 // Web Speech API type declarations
 interface SpeechRecognitionEvent extends Event {
@@ -53,6 +65,78 @@ declare global {
     webkitSpeechRecognition: new () => SpeechRecognition;
   }
 }
+// ─── Terminal Markdown Renderer ────────────────────────────────────────────
+// Converts a single markdown line to ANSI-formatted terminal text.
+// Handles: headings (# / ## / ###), **bold**, `code`, - / * bullets, ---
+// ─────────────────────────────────────────────────────────────────────────────
+function renderMarkdownLine(line: string): string {
+  const RESET = '\x1b[0m';
+  const BOLD = '\x1b[1m';
+  const DIM = '\x1b[2m';
+  const CYAN = '\x1b[38;5;39m';   // same teal used for the AI border
+  const YELLOW = '\x1b[38;5;220m';  // h2 / h3
+  const WHITE = '\x1b[97m';
+
+  // --- headings ---
+  if (/^#{4,}\s/.test(line)) {
+    const text = line.replace(/^#{4,}\s*/, '');
+    return `    ${BOLD}${DIM}${renderInline(text)}${RESET}`;
+  }
+  if (/^###\s/.test(line)) {
+    const text = line.replace(/^###\s*/, '');
+    return `   ${BOLD}${YELLOW}${renderInline(text)}${RESET}`;
+  }
+  if (/^##\s/.test(line)) {
+    const text = line.replace(/^##\s*/, '');
+    return `  ${BOLD}${CYAN}${renderInline(text)}${RESET}`;
+  }
+  if (/^#\s/.test(line)) {
+    const text = line.replace(/^#\s*/, '');
+    return `${BOLD}${WHITE}${renderInline(text)}${RESET}`;
+  }
+
+  // --- horizontal rule ---
+  if (/^(-{3,}|\*{3,}|_{3,})$/.test(line.trim())) {
+    return `${DIM}${'─'.repeat(48)}${RESET}`;
+  }
+
+  // --- unordered bullets (- item  or  * item) ---
+  const bulletMatch = line.match(/^(\s*)[-*]\s+(.*)/);
+  if (bulletMatch) {
+    const indent = bulletMatch[1] || '';
+    const text = bulletMatch[2];
+    return `${indent}  ${CYAN}•${RESET} ${renderInline(text)}`;
+  }
+
+  // --- numbered list (1. item) ---
+  const numMatch = line.match(/^(\s*)(\d+)\.\s+(.*)/)
+  if (numMatch) {
+    const indent = numMatch[1] || '';
+    const num = numMatch[2];
+    const text = numMatch[3];
+    return `${indent}  ${CYAN}${num}.${RESET} ${renderInline(text)}`;
+  }
+
+  // --- regular line: apply inline styles ---
+  return renderInline(line);
+}
+
+/** Apply inline markdown: **bold**, *italic*, `code` */
+function renderInline(text: string): string {
+  const RESET = '\x1b[0m';
+  const BOLD = '\x1b[1m';
+  const ITALIC = '\x1b[3m';
+  const CODE_BG = '\x1b[38;5;108m';  // muted green for inline code
+
+  return text
+    // **bold** or __bold__
+    .replace(/\*\*(.+?)\*\*|__(.+?)__/g, (_, a, b) => `${BOLD}${a ?? b}${RESET}`)
+    // *italic* or _italic_ (single, not double)
+    .replace(/(?<!\*)\*(?!\*)(.+?)(?<!\*)\*(?!\*)|(?<!_)_(?!_)(.+?)(?<!_)_(?!_)/g, (_, a, b) => `${ITALIC}${a ?? b}${RESET}`)
+    // `inline code`
+    .replace(/`([^`]+)`/g, (_, code) => `${CODE_BG}${code}${RESET}`);
+}
+
 
 interface TerminalBlockProps {
   cwd?: string;
@@ -75,6 +159,8 @@ interface TerminalBlockProps {
   projectFileContents?: Record<string, string>;
   // Structured workspace context from WorkspaceService
   workspaceContext?: WorkspaceContext | null;
+  // Open the git changes panel from terminal controls
+  onOpenGitPanel?: () => void;
 }
 
 export interface TerminalRef {
@@ -92,6 +178,8 @@ interface PtyExit {
   exit_code: number | null;
 }
 
+const EDIT_MODE_STORAGE_KEY = "velix-edit-mode";
+
 // Local command suggestion engine — returns full predicted command or empty string
 function getLocalCommandSuggestion(input: string, npmScripts: string[]): string {
   const lower = input.toLowerCase();
@@ -99,21 +187,36 @@ function getLocalCommandSuggestion(input: string, npmScripts: string[]): string 
 
   // npm suggestions driven by package.json scripts
   if (lower === 'npm') {
-    const preferred = npmScripts.find(s => s.includes('tauri') || s === 'dev') || npmScripts[0];
+    const preferred =
+      npmScripts.find((s) => s.includes('tauri') || s.includes('electron') || s === 'dev') ||
+      npmScripts[0];
     return preferred ? `npm run ${preferred}` : 'npm run dev';
   }
   if (lower.startsWith('npm run ')) {
     const partial = lower.slice('npm run '.length);
     const match = npmScripts.find(s => s.toLowerCase().startsWith(partial) && s.toLowerCase() !== partial);
     if (match) return `npm run ${match}`;
-    const common = ['dev', 'build', 'start', 'test', 'tauri', 'tauri dev', 'lint', 'preview'];
+    const common = [
+      'dev',
+      'build',
+      'start',
+      'test',
+      'tauri',
+      'tauri dev',
+      'electron',
+      'dev:electron',
+      'lint',
+      'preview',
+    ];
     const cm = common.find(s => s.startsWith(partial) && s !== partial);
     if (cm) return `npm run ${cm}`;
   }
   if (lower.startsWith('npm r') && !lower.startsWith('npm run')) {
     const partial = lower.slice('npm '.length);
     if ('run'.startsWith(partial)) {
-      const preferred = npmScripts.find(s => s.includes('tauri') || s === 'dev') || npmScripts[0];
+      const preferred =
+        npmScripts.find((s) => s.includes('tauri') || s.includes('electron') || s === 'dev') ||
+        npmScripts[0];
       if (preferred) return `npm run ${preferred}`;
     }
   }
@@ -273,6 +376,43 @@ function isAIRequest(input: string): boolean {
   return false;
 }
 
+function isLikelyEditRequest(input: string): boolean {
+  const text = input.trim().toLowerCase();
+  if (!text) return false;
+
+  // Explicitly read-only requests should not be blocked.
+  if (/\b(explain|analyze|review|summarize|describe|what is|show|read|list)\b/.test(text) &&
+    !/\b(edit|modify|change|write|create|delete|rename|refactor|fix|implement|add)\b/.test(text)) {
+    return false;
+  }
+
+  return (
+    /\b(edit|modify|change|rewrite|refactor|fix|implement|create|add|remove|delete|rename|update|generate)\b/.test(text) ||
+    /\b(write to|apply patch|change code|update file|new file|save file)\b/.test(text) ||
+    /\b(npm install|pnpm add|yarn add|cargo add|pip install|go get|bundle add)\b/.test(text)
+  );
+}
+
+function formatElapsed(seconds: number): string {
+  const mins = Math.floor(seconds / 60);
+  const secs = seconds % 60;
+  return `${mins}:${secs.toString().padStart(2, '0')}`;
+}
+
+const READ_ONLY_TOOLS_WHEN_EDIT_OFF: Record<string, boolean> = {
+  '*': false,
+  invalid: true,
+  question: true,
+  read: true,
+  glob: true,
+  grep: true,
+  webfetch: true,
+  websearch: true,
+  codesearch: true,
+  skill: true,
+  todoread: true,
+};
+
 export const TerminalBlock = forwardRef<TerminalRef, TerminalBlockProps>(({
   cwd,
   theme = "dark",
@@ -286,6 +426,7 @@ export const TerminalBlock = forwardRef<TerminalRef, TerminalBlockProps>(({
   projectFileList = [],
   projectFileContents = {},
   workspaceContext: wsContext = null,
+  onOpenGitPanel,
 }, ref) => {
   const containerRef = useRef<HTMLDivElement | null>(null);
   const termRef = useRef<Terminal | null>(null);
@@ -299,15 +440,30 @@ export const TerminalBlock = forwardRef<TerminalRef, TerminalBlockProps>(({
   const [isListening, setIsListening] = useState(false);
   const [hideInputCard, setHideInputCard] = useState(false);
   const [isAIProcessing, setIsAIProcessing] = useState(false);
+  const [aiStartedAt, setAiStartedAt] = useState<number | null>(null);
+  const [aiElapsedSec, setAiElapsedSec] = useState(0);
+  const [isAIStopping, setIsAIStopping] = useState(false);
   const [aiConversation, setAiConversation] = useState<ChatMessage[]>([]);
+  const [aiChatMessages, setAiChatMessages] = useState<AIChatMessage[]>([]);
+  const [streamingContent, setStreamingContent] = useState<string>("");
   const [commandSuggestion, setCommandSuggestion] = useState<string>("");
   const [showModelPicker, setShowModelPicker] = useState(false);
   const [currentAIConfig, setCurrentAIConfig] = useState(() => aiService.getConfig());
+  const [reviewFileChanges, setReviewFileChanges] = useState<FileDiff[]>([]);
+  const [showReviewPanel, setShowReviewPanel] = useState(false);
+  const [editModeEnabled, setEditModeEnabled] = useState<boolean>(() => {
+    if (typeof window === "undefined") return false;
+    return localStorage.getItem(EDIT_MODE_STORAGE_KEY) === "on";
+  });
+  const [pendingEditApproval, setPendingEditApproval] = useState<FileDiff[] | null>(null);
+  const [blockedEditPrompt, setBlockedEditPrompt] = useState<string | null>(null);
   const inputRef = useRef<HTMLInputElement>(null);
   const recognitionRef = useRef<SpeechRecognition | null>(null);
   const suggestionTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const suggestionRequestId = useRef<number>(0);
   const modelPickerRef = useRef<HTMLDivElement>(null);
+  const aiAbortControllerRef = useRef<AbortController | null>(null);
+  const aiStopRequestedRef = useRef(false);
 
   // Close model picker when clicking outside
   useEffect(() => {
@@ -320,6 +476,15 @@ export const TerminalBlock = forwardRef<TerminalRef, TerminalBlockProps>(({
     document.addEventListener("mousedown", handleClickOutside);
     return () => document.removeEventListener("mousedown", handleClickOutside);
   }, [showModelPicker]);
+
+  useEffect(() => {
+    if (!isAIProcessing || aiStartedAt === null) return;
+    setAiElapsedSec(Math.max(0, Math.floor((Date.now() - aiStartedAt) / 1000)));
+    const timer = setInterval(() => {
+      setAiElapsedSec(Math.max(0, Math.floor((Date.now() - aiStartedAt) / 1000)));
+    }, 1000);
+    return () => clearInterval(timer);
+  }, [isAIProcessing, aiStartedAt]);
 
   // Generate a unique session ID
   const generateSessionId = () => {
@@ -673,6 +838,57 @@ ${npmScripts.length > 0 ? `Available npm scripts: ${npmScripts.join(', ')}.` : '
     }
   };
 
+  const applyFileDiffs = useCallback(async (fileDiffs: FileDiff[]) => {
+    if (fileDiffs.length === 0) return [] as FileDiff[];
+
+    const term = termRef.current;
+    let successCount = 0;
+    const appliedDiffs: FileDiff[] = [];
+    for (const fileDiff of fileDiffs) {
+      try {
+        await writeTextFile(fileDiff.change.filePath, fileDiff.change.newContent);
+        onFileUpdate?.(fileDiff.change.filePath, fileDiff.change.newContent);
+        successCount++;
+        appliedDiffs.push(fileDiff);
+      } catch (err) {
+        term?.writeln(`\x1b[31m  ✗ Failed: ${fileDiff.change.displayPath}: ${err}\x1b[0m`);
+      }
+    }
+
+    if (successCount > 0) {
+      workspaceService.invalidateCache();
+      term?.writeln('');
+      term?.writeln(
+        `\x1b[38;5;82m✓ Auto-applied ${successCount} file change${successCount !== 1 ? 's' : ''}.\x1b[0m`,
+      );
+      term?.writeln('\x1b[38;5;245mUse "Review files" to inspect and revert.\x1b[0m');
+    }
+    return appliedDiffs;
+  }, [onFileUpdate]);
+
+  const revertFileDiff = useCallback(async (fileDiff: FileDiff) => {
+    if (fileDiff.change.originalContent === null) {
+      await remove(fileDiff.change.filePath);
+      return;
+    }
+    await writeTextFile(fileDiff.change.filePath, fileDiff.change.originalContent);
+    onFileUpdate?.(fileDiff.change.filePath, fileDiff.change.originalContent);
+  }, [onFileUpdate]);
+
+  const handleStopAIResponse = useCallback(async () => {
+    if (!isAIProcessing || isAIStopping) return;
+    aiStopRequestedRef.current = true;
+    setIsAIStopping(true);
+    aiAbortControllerRef.current?.abort();
+    try {
+      await aiService.abortCurrentResponse();
+    } catch {
+      // Best effort stop signal; local abort already stopped streaming.
+    } finally {
+      setIsAIStopping(false);
+    }
+  }, [isAIProcessing, isAIStopping]);
+
   // Handle AI request and display response in terminal
   const handleAIInTerminal = useCallback(async (prompt: string) => {
     if (!termRef.current) return;
@@ -689,27 +905,63 @@ ${npmScripts.length > 0 ? `Available npm scripts: ${npmScripts.join(', ')}.` : '
     const fileCount = hasWorkspaceCtx ? wsContext.totalLoadedFiles : projectContentKeys.length;
     const totalFileCount = hasWorkspaceCtx ? wsContext.totalFiles : projectFileList.length;
 
-    // Show user prompt in terminal with context indicator
+    // Add user message to chat panel
     const contextLabel = hasProjectContents
-      ? ` [📁 ${projectName} · ${fileCount}/${totalFileCount} files]`
-      : '';
-    term.writeln(`\r\n\x1b[38;5;141m┌─ You${contextLabel} ─────────────────────────────\x1b[0m`);
-    term.writeln(`\x1b[38;5;141m│\x1b[0m ${prompt}`);
-    if (hasProjectContents) {
-      term.writeln(`\x1b[38;5;141m│\x1b[0m \x1b[38;5;245m(AI has full project: ${fileCount} files loaded, ${totalFileCount} total in workspace)\x1b[0m`);
-    } else {
-      term.writeln(`\x1b[38;5;141m│\x1b[0m \x1b[38;5;245m(No project loaded. Open a project folder first.)\x1b[0m`);
+      ? `${projectName} · ${fileCount}/${totalFileCount} files`
+      : undefined;
+    setAiChatMessages(prev => [
+      ...prev,
+      { id: `user-${Date.now()}`, role: 'user', content: prompt },
+    ]);
+
+    if (!editModeEnabled && isLikelyEditRequest(prompt)) {
+      setBlockedEditPrompt(prompt);
+      setAiChatMessages(prev => [
+        ...prev,
+        {
+          id: `edit-blocked-${Date.now()}`,
+          role: 'assistant',
+          content: `Edit Mode is **OFF**, so I paused this request before making code changes.\n\nEnable Edit Mode to continue this request.`,
+        },
+      ]);
+      term.writeln('');
+      term.writeln('\x1b[38;5;220m⚠ Edit Mode is OFF. This request likely requires file changes.\x1b[0m');
+      term.writeln('\x1b[38;5;245mEnable Edit Mode to continue.\x1b[0m');
+
+      // Best-effort native notification
+      (async () => {
+        try {
+          let granted = await isPermissionGranted();
+          if (!granted) granted = (await requestPermission()) === 'granted';
+          if (granted) {
+            await sendNotification({
+              title: 'Edit Mode Required',
+              body: 'Turn on Edit Mode to let AI make file changes.',
+            });
+          }
+        } catch {
+          // Optional notification only.
+        }
+      })();
+      return;
     }
-    term.writeln(`\x1b[38;5;141m└───────────────────────────────────────────────────\x1b[0m`);
-    term.writeln("");
 
     // Check if AI is configured
-    if (!aiEnabled || !aiService.isProviderReady()) {
-      term.writeln(`\x1b[33m[AI not configured. Go to Settings to add your API key. Current provider: ${aiService.getConfig().provider}]\x1b[0m\r\n`);
+    if (!aiEnabled) {
+      setAiChatMessages(prev => [
+        ...prev,
+        { id: `error-${Date.now()}`, role: 'assistant', content: '**No API key configured.** Open Settings and add a Claude / OpenAI / etc. key to enable AI.' },
+      ]);
       return;
     }
 
     setIsAIProcessing(true);
+    setIsAIStopping(false);
+    setAiStartedAt(Date.now());
+    setAiElapsedSec(0);
+    aiStopRequestedRef.current = false;
+    const requestAbortController = new AbortController();
+    aiAbortControllerRef.current = requestAbortController;
 
     // Build system message with full project context
     let systemContent: string;
@@ -800,244 +1052,206 @@ No project is loaded. Tell the user to open a project folder so you can see thei
       systemMessageLength: systemMessage.content.length
     });
 
+    let assistantMsgId = '';
+    let accumulated = '';
+    let isFirstChunk = true;
+    let typingInterval: ReturnType<typeof setInterval> | null = null;
+
     try {
-      term.writeln(`\x1b[38;5;39m┌─ AI ──────────────────────────────────────────────\x1b[0m`);
-      term.write(`\x1b[38;5;39m│\x1b[0m `);
+      // ── Create a streaming placeholder for the assistant ──────────────────
+      assistantMsgId = `assistant-${Date.now()}`;
+      setAiChatMessages(prev => [
+        ...prev,
+        { id: assistantMsgId, role: 'assistant', content: '', streaming: true },
+      ]);
+      setStreamingContent('');
 
-      // Show typing indicator
-      const typingInterval = setInterval(() => {
-        term.write('.');
-      }, 200);
+      // ── Animated status indicator in xterm (subtle, only during loading) ──
+      const statusPhases: string[] = [];
+      if (hasWorkspaceCtx && wsContext) {
+        statusPhases.push(`📁 Reading ${wsContext.totalLoadedFiles} files...`);
+        statusPhases.push(`🔍 Analyzing ${projectName}...`);
+        if (currentFile) {
+          const fname = currentFile.path.split('/').pop() || currentFile.path;
+          statusPhases.push(`📄 Looking at ${fname}...`);
+        }
+      } else if (hasProjectContents) {
+        statusPhases.push(`📁 Reading project files...`);
+        statusPhases.push(`🔍 Analyzing codebase...`);
+      }
+      statusPhases.push('💭 Thinking...', '✍️  Generating...', '🧠 Reasoning...');
 
-      // Collect streaming response
-      let streamedContent = '';
-      let isFirstChunk = true;
-      let currentLineBuffer = '';
+      let phaseIdx = 0;
+      let dotCount = 0;
+      const spinners = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
+      let spinnerIdx = 0;
+      const dim = '\x1b[38;5;245m', reset = '\x1b[0m';
+      term.write(`${dim}${spinners[0]} ${statusPhases[0]}${reset}`);
+      typingInterval = setInterval(() => {
+        spinnerIdx = (spinnerIdx + 1) % spinners.length;
+        dotCount++;
+        if (dotCount % 16 === 0) phaseIdx = (phaseIdx + 1) % statusPhases.length;
+        term.write(`\r${dim}${spinners[spinnerIdx]} ${statusPhases[phaseIdx]}${reset}\x1b[K`);
+      }, 120);
+
+      // ── Stream AI response into chat state ───────────────────────────────
+      const toolPermissions = editModeEnabled
+        ? undefined
+        : READ_ONLY_TOOLS_WHEN_EDIT_OFF;
 
       const response = await aiService.chat(messages, {
         stream: true,
         projectContents: hasProjectContents ? effectiveProjectContents : undefined,
+        tools: toolPermissions,
+        signal: requestAbortController.signal,
         onStream: (chunk: string) => {
-          // Clear typing indicator on first chunk
           if (isFirstChunk) {
-            clearInterval(typingInterval);
-            // Clear the typing dots
-            term.write('\r\x1b[K');
-            term.write(`\x1b[38;5;39m│\x1b[0m `);
+            if (typingInterval) clearInterval(typingInterval);
+            term.write(`\r\x1b[K`); // wipe the spinner line
             isFirstChunk = false;
           }
-
-          // Process chunk character by character
-          for (const char of chunk) {
-            streamedContent += char;
-
-            if (char === '\n') {
-              // Handle newline - write current line and start new one with prefix
-              term.write('\r\n');
-              term.write(`\x1b[38;5;39m│\x1b[0m `);
-              currentLineBuffer = '';
-            } else {
-              // Write character and add to line buffer
-              term.write(char);
-              currentLineBuffer += char;
-            }
-          }
+          accumulated += chunk;
+          setStreamingContent(accumulated);
         }
       });
 
-      // Clear typing indicator if still showing
+      // Clear spinner if no streaming happened
       if (isFirstChunk) {
-        clearInterval(typingInterval);
-        term.write('\r\x1b[K');
-        term.write(`\x1b[38;5;39m│\x1b[0m `);
+        if (typingInterval) clearInterval(typingInterval);
+        term.write(`\r\x1b[K`);
       }
 
-      const content = streamedContent || response.content;
+      const content = accumulated || response.content;
 
-      // If streaming was used, content is already written, just parse for commands/code blocks
-      // Otherwise, parse and display the response
-      const lines = content.split('\n');
-      let pendingCommands: string[] = [];
-      let codeBlocks: Array<{ language: string; content: string }> = [];
-      let currentCodeBlock: string[] = [];
-      let inCodeBlock = false;
-      let codeBlockLanguage = '';
+      // ── Finalise the assistant chat bubble ───────────────────────────────
+      setAiChatMessages(prev =>
+        prev.map(m => m.id === assistantMsgId
+          ? { ...m, content, streaming: false }
+          : m
+        )
+      );
+      setStreamingContent('');
 
-      // If content was not streamed, we need to write it now
-      if (!streamedContent) {
-        let isFirstLine = true;
-        for (const line of lines) {
-          // Check if this is a command suggestion
-          if (line.trim().startsWith('$ ')) {
-            const cmd = line.trim().substring(2);
-            pendingCommands.push(cmd);
-            if (isFirstLine) {
-              term.writeln(`\x1b[38;5;220m${line}\x1b[0m`);
-              isFirstLine = false;
-            } else {
-              term.writeln(`\x1b[38;5;39m│\x1b[0m \x1b[38;5;220m${line}\x1b[0m`);
-            }
-          } else if (line.startsWith('```')) {
-            // Code block marker
-            if (!inCodeBlock) {
-              // Starting code block
-              inCodeBlock = true;
-              codeBlockLanguage = line.substring(3).trim();
-              currentCodeBlock = [];
-            } else {
-              // Ending code block
-              inCodeBlock = false;
-              const fullCodeBlock = currentCodeBlock.join('\n');
-              codeBlocks.push({
-                language: codeBlockLanguage,
-                content: fullCodeBlock
-              });
-              currentCodeBlock = [];
-            }
-
-            if (isFirstLine) {
-              term.writeln(`\x1b[38;5;245m${line}\x1b[0m`);
-              isFirstLine = false;
-            } else {
-              term.writeln(`\x1b[38;5;39m│\x1b[0m \x1b[38;5;245m${line}\x1b[0m`);
-            }
-          } else if (inCodeBlock) {
-            // Inside code block
-            currentCodeBlock.push(line);
-            if (isFirstLine) {
-              term.writeln(line);
-              isFirstLine = false;
-            } else {
-              term.writeln(`\x1b[38;5;39m│\x1b[0m ${line}`);
-            }
-          } else {
-            // Regular text
-            if (isFirstLine) {
-              term.writeln(line);
-              isFirstLine = false;
-            } else {
-              term.writeln(`\x1b[38;5;39m│\x1b[0m ${line}`);
-            }
-          }
-        }
-      } else {
-        // Content was streamed, just parse for commands and code blocks
-        for (const line of lines) {
-          if (line.trim().startsWith('$ ')) {
-            const cmd = line.trim().substring(2);
-            pendingCommands.push(cmd);
-          } else if (line.startsWith('```')) {
-            if (!inCodeBlock) {
-              inCodeBlock = true;
-              codeBlockLanguage = line.substring(3).trim();
-              currentCodeBlock = [];
-            } else {
-              inCodeBlock = false;
-              const fullCodeBlock = currentCodeBlock.join('\n');
-              codeBlocks.push({
-                language: codeBlockLanguage,
-                content: fullCodeBlock
-              });
-              currentCodeBlock = [];
-            }
-          } else if (inCodeBlock) {
-            currentCodeBlock.push(line);
-          }
-        }
+      // ── Parse file changes (FILE: … ``` blocks) for the diff panel ───────
+      const fileChangeRegex = /FILE:\s*(.+?)\s*\n```\w*\n([\s\S]*?)```/g;
+      let fileMatch;
+      const pendingChanges: PendingFileChange[] = [];
+      while ((fileMatch = fileChangeRegex.exec(content)) !== null) {
+        const displayPath = fileMatch[1].trim();
+        const newContent = fileMatch[2];
+        const fullPath = displayPath.startsWith('/')
+          ? displayPath
+          : `${projectDir || cwd}/${displayPath}`;
+        let originalContent: string | null = null;
+        try { originalContent = await readTextFile(fullPath); } catch { /* new file */ }
+        pendingChanges.push({ filePath: fullPath, displayPath, originalContent, newContent });
       }
-
-      term.writeln(`\x1b[38;5;39m└───────────────────────────────────────────────────\x1b[0m`);
-
-      // If there are pending commands, offer to execute them
-      if (pendingCommands.length > 0) {
-        term.writeln("");
-        term.writeln(`\x1b[38;5;220m> Suggested command${pendingCommands.length > 1 ? 's' : ''}:\x1b[0m`);
-        pendingCommands.forEach((cmd, i) => {
-          term.writeln(`   \x1b[38;5;39m[${i + 1}]\x1b[0m $ ${cmd}`);
+      if (pendingChanges.length > 0) {
+        const fileDiffs: FileDiff[] = pendingChanges.map(change => {
+          const { hunks, addedCount, removedCount } = computeLineDiff(
+            change.originalContent ?? '', change.newContent,
+          );
+          return { change, hunks, addedCount, removedCount, isNewFile: change.originalContent === null };
         });
-        term.writeln(`\x1b[38;5;245m   Type the number to execute, or press Enter to skip\x1b[0m`);
+        if (editModeEnabled) {
+          const appliedDiffs = await applyFileDiffs(fileDiffs);
+          setReviewFileChanges(appliedDiffs);
+          setShowReviewPanel(false);
+        } else {
+          setPendingEditApproval(fileDiffs);
+          term.writeln('');
+          term.writeln(
+            `\x1b[38;5;220m⚠ Edit permission required: AI wants to change ${fileDiffs.length} file${fileDiffs.length !== 1 ? 's' : ''}.\x1b[0m`,
+          );
+          term.writeln(
+            '\x1b[38;5;245mUse "Allow Once", "Enable Edit Mode + Allow", or "Deny" in the approval card.\x1b[0m',
+          );
+        }
+      }
+
+      // ── Parse suggested commands from content ($ cmd) ────────────────────
+      const pendingCommands: string[] = [];
+      for (const line of content.split('\n')) {
+        if (line.trim().startsWith('$ ')) pendingCommands.push(line.trim().substring(2));
+      }
+      if (pendingCommands.length > 0) {
         (window as unknown as { __velixPendingCommands?: string[] }).__velixPendingCommands = pendingCommands;
       }
 
-      // Auto-apply file changes: parse "FILE: path" + code block patterns
-      const fileChangeRegex = /FILE:\s*(.+?)\s*\n```\w*\n([\s\S]*?)```/g;
-      let fileMatch;
-      const appliedFiles: string[] = [];
-
-      while ((fileMatch = fileChangeRegex.exec(content)) !== null) {
-        const filePath = fileMatch[1].trim();
-        const fileContent = fileMatch[2];
-
-        // Resolve full path
-        const fullPath = filePath.startsWith('/')
-          ? filePath
-          : `${projectDir || cwd}/${filePath}`;
-
-        try {
-          await writeTextFile(fullPath, fileContent);
-          appliedFiles.push(filePath);
-          term.writeln(`\x1b[38;5;82m  ✓ Updated: ${filePath}\x1b[0m`);
-        } catch (err) {
-          term.writeln(`\x1b[31m  ✗ Failed to write ${filePath}: ${err}\x1b[0m`);
-        }
-      }
-
-      if (appliedFiles.length > 0) {
-        term.writeln("");
-        term.writeln(`\x1b[38;5;82m✓ Applied changes to ${appliedFiles.length} file${appliedFiles.length > 1 ? 's' : ''}\x1b[0m`);
-        // Invalidate workspace cache so next AI request sees updated files
-        workspaceService.invalidateCache();
-      }
-
-      term.writeln("");
-
-      // Update conversation history
+      // ── Update conversation history for multi-turn context ────────────────
       setAiConversation(prev => [
         ...prev.slice(-9),
         newUserMessage,
-        { role: "assistant", content }
+        { role: 'assistant', content }
       ]);
 
     } catch (error) {
       console.error('AI Request Error:', error);
-      console.error('Error details:', {
-        message: error instanceof Error ? error.message : 'Unknown error',
-        stack: error instanceof Error ? error.stack : undefined,
-        aiEnabled,
-        providerReady: aiService.isProviderReady(),
-        config: aiService.getConfig()
-      });
-      
-      // Always show detailed error info
       const errorMessage = error instanceof Error ? error.message : 'Failed to get AI response';
-      const errorDetails = error instanceof Error ? error.stack : JSON.stringify(error);
-      
-      term.writeln(`\x1b[31mAI Error: ${errorMessage}\x1b[0m`);
-      term.writeln(`\x1b[90mDetails: ${errorDetails?.substring(0, 200)}...\x1b[0m`);
-      
-      // If it's a network/connection error, provide more helpful info
-      if (errorMessage.includes('connection failed') || errorMessage.includes('CORS') || errorMessage.includes('Load failed')) {
-        term.writeln(`\x1b[33mThis might be a network issue. Check your internet connection and API key validity.\x1b[0m`);
+      if (typingInterval) {
+        clearInterval(typingInterval);
+        term.write(`\r\x1b[K`);
       }
-      
-      // If it's about provider not being ready
-      if (errorMessage.includes('not initialized') || errorMessage.includes('API key')) {
-        term.writeln(`\x1b[33mPlease configure your API key in Settings.\x1b[0m`);
+
+      const isAbortError =
+        aiStopRequestedRef.current ||
+        (error instanceof DOMException && error.name === 'AbortError') ||
+        /aborted|aborterror|request was aborted|signal is aborted/i.test(errorMessage);
+
+      if (isAbortError) {
+        const stoppedContent = accumulated
+          ? `${accumulated}\n\n_Stopped by user._`
+          : '_Stopped by user._';
+        setAiChatMessages(prev => prev.map(m =>
+          m.id === assistantMsgId
+            ? { ...m, content: stoppedContent, streaming: false }
+            : m
+        ));
+        setStreamingContent('');
+        term.writeln('');
+        term.writeln('\x1b[38;5;245m⏹ AI response stopped.\x1b[0m');
+        return;
       }
-      
-      // Show current config for debugging
-      try {
-        const config = aiService.getConfig();
-        term.writeln(`\x1b[90mCurrent provider: ${config.provider} | Ready: ${aiService.isProviderReady()}\x1b[0m`);
-      } catch (e) {
-        term.writeln(`\x1b[90mCould not get AI config\x1b[0m`);
+
+      const isPermissionBlocked =
+        !editModeEnabled &&
+        /(specific tool call|rejected permission|rule which prevents|prevents you from using)/i.test(errorMessage);
+
+      if (isPermissionBlocked) {
+        setBlockedEditPrompt(prompt);
+        setAiChatMessages(prev => [
+          ...prev.filter(m => !m.streaming),
+          {
+            id: `edit-blocked-permission-${Date.now()}`,
+            role: 'assistant',
+            content: `I hit an edit permission block because Edit Mode is **OFF**.\n\nEnable Edit Mode and retry to continue this coding request.`,
+            streaming: false,
+          }
+        ]);
+        setStreamingContent('');
+        return;
       }
-      
-      term.writeln(`\x1b[38;5;39m└───────────────────────────────────────────────────\x1b[0m\r\n`);
+
+      // Show error as an assistant message in the chat panel
+      setAiChatMessages(prev => [
+        ...prev.filter(m => !m.streaming), // remove defunct streaming bubble
+        {
+          id: `error-${Date.now()}`,
+          role: 'assistant',
+          content: `**Error:** ${errorMessage}\n\nThis might be a network issue. Check your internet connection and API key in Settings.`,
+          streaming: false,
+        }
+      ]);
+      setStreamingContent('');
     } finally {
       setIsAIProcessing(false);
+      setIsAIStopping(false);
+      setAiStartedAt(null);
+      setAiElapsedSec(0);
+      aiAbortControllerRef.current = null;
+      aiStopRequestedRef.current = false;
     }
-  }, [aiEnabled, cwd, aiConversation, currentFile, onFileUpdate, projectDir, projectFileList, projectFileContents, wsContext]);
+  }, [aiEnabled, cwd, aiConversation, currentFile, projectDir, projectFileList, projectFileContents, wsContext, editModeEnabled, applyFileDiffs]);
 
   // Handle input submission
   const handleInputSubmit = (e: React.FormEvent) => {
@@ -1047,12 +1261,13 @@ No project is loaded. Tell the user to open a project folder so you can see thei
     if (!inputValue.trim()) return;
     if (isAIProcessing) return; // Don't allow new input while processing
 
+
     const trimmedInput = inputValue.trim();
 
     // Check if user is selecting a pending command
     const pendingCommands = (window as unknown as { __velixPendingCommands?: string[] }).__velixPendingCommands;
     const pendingCodeBlocks = (window as unknown as { __velixPendingCodeBlocks?: Array<{ language: string; content: string }> }).__velixPendingCodeBlocks;
-    
+
     if (pendingCommands && /^[1-9]$/.test(trimmedInput)) {
       const cmdIndex = parseInt(trimmedInput) - 1;
       if (cmdIndex < pendingCommands.length) {
@@ -1072,12 +1287,12 @@ No project is loaded. Tell the user to open a project folder so you can see thei
         // Apply the selected code block
         const selectedBlock = pendingCodeBlocks[blockIndex];
         onFileUpdate(currentFile.path, selectedBlock.content);
-        
+
         // Show confirmation in terminal
         if (termRef.current) {
           termRef.current.writeln(`\r\n\x1b[38;5;208m✅ Applied changes to ${currentFile.path}\x1b[0m\r\n`);
         }
-        
+
         delete (window as unknown as { __velixPendingCodeBlocks?: Array<{ language: string; content: string }> }).__velixPendingCodeBlocks;
         setInputValue("");
         setInputMode("terminal");
@@ -1157,14 +1372,197 @@ No project is loaded. Tell the user to open a project folder so you can see thei
     }
   };
 
-  // Calculate git stats
-  const addedLines = gitChanges.reduce((sum, change) => sum + (change.type === 'A' ? 1 : 0), 0);
-  const modifiedFiles = gitChanges.filter(change => change.type === 'M').length;
-  const totalAdded = modifiedFiles * 100 + addedLines * 50; // Simulated
-  const totalRemoved = modifiedFiles * 50; // Simulated
+  // ── Diff review handlers ──────────────────────────────────────────────────
+
+  const handleOpenReviewPanel = useCallback(() => {
+    if (reviewFileChanges.length === 0) return;
+    setShowReviewPanel(true);
+  }, [reviewFileChanges.length]);
+
+  const handleCloseReviewPanel = useCallback(() => {
+    setShowReviewPanel(false);
+  }, []);
+
+  const handleKeepAllChanges = useCallback(() => {
+    setReviewFileChanges([]);
+    setShowReviewPanel(false);
+  }, []);
+
+  const handleRevertAllChanges = useCallback(async () => {
+    const term = termRef.current;
+    let revertedCount = 0;
+    for (const fileDiff of reviewFileChanges) {
+      try {
+        await revertFileDiff(fileDiff);
+        revertedCount++;
+      } catch (err) {
+        term?.writeln(`\x1b[31m  ✗ Failed to revert: ${fileDiff.change.displayPath}: ${err}\x1b[0m`);
+      }
+    }
+    if (revertedCount > 0) {
+      workspaceService.invalidateCache();
+      term?.writeln('');
+      term?.writeln(
+        `\x1b[38;5;220m↺ Reverted ${revertedCount} file change${revertedCount !== 1 ? 's' : ''}.\x1b[0m`,
+      );
+    }
+    setReviewFileChanges([]);
+    setShowReviewPanel(false);
+  }, [reviewFileChanges, revertFileDiff]);
+
+  const handleRevertFile = useCallback(async (filePath: string) => {
+    const fileDiff = reviewFileChanges.find(d => d.change.filePath === filePath);
+    if (!fileDiff) return;
+    const term = termRef.current;
+    try {
+      await revertFileDiff(fileDiff);
+      term?.writeln(`\x1b[38;5;220m  ↺ Reverted: ${fileDiff.change.displayPath}\x1b[0m`);
+      const remaining = reviewFileChanges.filter(d => d.change.filePath !== filePath);
+      if (remaining.length === 0) {
+        workspaceService.invalidateCache();
+        setShowReviewPanel(false);
+      }
+      setReviewFileChanges(remaining);
+    } catch (err) {
+      term?.writeln(`\x1b[31m  ✗ Failed to revert: ${fileDiff.change.displayPath}: ${err}\x1b[0m`);
+    }
+  }, [reviewFileChanges, revertFileDiff]);
+
+  const setEditMode = useCallback((enabled: boolean) => {
+    setEditModeEnabled(enabled);
+    if (typeof window !== "undefined") {
+      localStorage.setItem(EDIT_MODE_STORAGE_KEY, enabled ? "on" : "off");
+    }
+    if (enabled) {
+      setBlockedEditPrompt(null);
+    }
+    // Reset opencode session so permission rules from previous mode don't linger.
+    aiService.setProvider(currentAIConfig.provider, currentAIConfig.model);
+    termRef.current?.writeln(
+      enabled
+        ? '\x1b[38;5;82m[Edit Mode ON] AI can propose edits without pre-approval.\x1b[0m'
+        : '\x1b[38;5;245m[Edit Mode OFF] AI must ask before proposing edits.\x1b[0m',
+    );
+  }, [currentAIConfig.model, currentAIConfig.provider]);
+
+  const toggleEditMode = useCallback(() => {
+    setEditMode(!editModeEnabled);
+  }, [editModeEnabled, setEditMode]);
+
+  const handleApproveEditsOnce = useCallback(async () => {
+    if (!pendingEditApproval || pendingEditApproval.length === 0) return;
+    const appliedDiffs = await applyFileDiffs(pendingEditApproval);
+    setReviewFileChanges(appliedDiffs);
+    setShowReviewPanel(false);
+    setPendingEditApproval(null);
+    termRef.current?.writeln(
+      `\x1b[38;5;82m✓ Edit approved and auto-applied (${pendingEditApproval.length} file${pendingEditApproval.length !== 1 ? 's' : ''}).\x1b[0m`,
+    );
+  }, [pendingEditApproval, applyFileDiffs]);
+
+  const handleApproveAndEnableEditMode = useCallback(async () => {
+    if (!pendingEditApproval || pendingEditApproval.length === 0) return;
+    setEditMode(true);
+    const appliedDiffs = await applyFileDiffs(pendingEditApproval);
+    setReviewFileChanges(appliedDiffs);
+    setShowReviewPanel(false);
+    setPendingEditApproval(null);
+    termRef.current?.writeln(
+      `\x1b[38;5;82m✓ Edit approved and auto-applied (${pendingEditApproval.length} file${pendingEditApproval.length !== 1 ? 's' : ''}).\x1b[0m`,
+    );
+  }, [pendingEditApproval, setEditMode, applyFileDiffs]);
+
+  const handleDenyEditProposal = useCallback(() => {
+    if (!pendingEditApproval || pendingEditApproval.length === 0) return;
+    termRef.current?.writeln(
+      `\x1b[38;5;245m✗ Edit request denied (${pendingEditApproval.length} file${pendingEditApproval.length !== 1 ? 's' : ''}).\x1b[0m`,
+    );
+    setPendingEditApproval(null);
+  }, [pendingEditApproval]);
+
+  const handleEnableEditAndContinue = useCallback(() => {
+    if (!blockedEditPrompt || isAIProcessing) return;
+    const promptToRetry = blockedEditPrompt;
+    setBlockedEditPrompt(null);
+    setEditMode(true);
+    setTimeout(() => {
+      handleAIInTerminal(promptToRetry);
+    }, 0);
+  }, [blockedEditPrompt, isAIProcessing, setEditMode, handleAIInTerminal]);
+
+  // Terminal / git summary chips
+  const modifiedCount = gitChanges.filter(change => change.type === 'M').length;
+  const addedCount = gitChanges.filter(change => change.type === 'A').length;
+  const deletedCount = gitChanges.filter(change => change.type === 'D').length;
+  const untrackedCount = gitChanges.filter(change => change.type === '?').length;
+  const totalChanges = gitChanges.length;
+  const gitDetailParts = [
+    modifiedCount > 0 ? `${modifiedCount} modified` : '',
+    addedCount > 0 ? `${addedCount} added` : '',
+    deletedCount > 0 ? `${deletedCount} deleted` : '',
+    untrackedCount > 0 ? `${untrackedCount} untracked` : '',
+  ].filter(Boolean);
+  const approvalAdded = (pendingEditApproval ?? []).reduce((sum, diff) => sum + diff.addedCount, 0);
+  const approvalRemoved = (pendingEditApproval ?? []).reduce((sum, diff) => sum + diff.removedCount, 0);
 
   return (
     <div className={`terminal-wrapper ${theme}`}>
+      {/* AI Diff Review Panel — opened on demand to inspect/revert auto-applied changes */}
+      {showReviewPanel && reviewFileChanges.length > 0 && (
+        <DiffPanel
+          fileDiffs={reviewFileChanges}
+          onRevertAll={handleRevertAllChanges}
+          onRevertFile={handleRevertFile}
+          onKeepAll={handleKeepAllChanges}
+          onClose={handleCloseReviewPanel}
+          theme={theme}
+        />
+      )}
+
+      {/* Edit permission gate (Claude-style) when Edit Mode is OFF */}
+      {pendingEditApproval && pendingEditApproval.length > 0 && (
+        <div className={`edit-approval-overlay ${theme}`}>
+          <div className={`edit-approval-card ${theme}`}>
+            <div className="edit-approval-header">
+              <span className="edit-approval-title">AI wants to edit files</span>
+              <span className="edit-approval-count">
+                {pendingEditApproval.length} file{pendingEditApproval.length !== 1 ? 's' : ''}
+              </span>
+            </div>
+            <p className="edit-approval-text">
+              Edit Mode is currently off. Approve this edit proposal before changes can be reviewed/applied.
+            </p>
+            <div className="edit-approval-stats">
+              {approvalAdded > 0 && <span className="edit-approval-added">+{approvalAdded}</span>}
+              {approvalRemoved > 0 && <span className="edit-approval-removed">−{approvalRemoved}</span>}
+            </div>
+            <div className="edit-approval-files">
+              {pendingEditApproval.map((fd) => (
+                <div key={fd.change.filePath} className="edit-approval-file-row">
+                  <span className="edit-approval-file-path">{fd.change.displayPath}</span>
+                  <span className="edit-approval-file-meta">
+                    {fd.isNewFile ? 'NEW' : ''}
+                    {fd.addedCount > 0 ? ` +${fd.addedCount}` : ''}
+                    {fd.removedCount > 0 ? ` −${fd.removedCount}` : ''}
+                  </span>
+                </div>
+              ))}
+            </div>
+            <div className="edit-approval-actions">
+              <button className="edit-approval-btn allow-once" onClick={handleApproveEditsOnce}>
+                Allow Once
+              </button>
+              <button className="edit-approval-btn enable-mode" onClick={handleApproveAndEnableEditMode}>
+                Enable Edit Mode + Allow
+              </button>
+              <button className="edit-approval-btn deny" onClick={handleDenyEditProposal}>
+                Deny
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
       {/* Simple header at top */}
       <div className="simple-header">
         <span>~/{cwd?.split('/').pop() || 'Vexilo/Velix'}</span>
@@ -1180,6 +1578,31 @@ No project is loaded. Tell the user to open a project folder so you can see thei
           ref={containerRef}
         />
       </div>
+
+      {/* AI Chat Panel — shown when there are AI messages */}
+      {aiChatMessages.length > 0 && (
+        <AIChat
+          messages={aiChatMessages}
+          streamingContent={streamingContent}
+          theme={theme}
+        />
+      )}
+
+      {blockedEditPrompt && !editModeEnabled && !isAIProcessing && (
+        <div className={`edit-mode-notice ${theme}`}>
+          <span className="edit-mode-notice-text">
+            This request needs file edits. Turn on Edit Mode to continue.
+          </span>
+          <div className="edit-mode-notice-actions">
+            <button className="edit-mode-notice-btn enable" onClick={handleEnableEditAndContinue}>
+              Enable Edit Mode + Continue
+            </button>
+            <button className="edit-mode-notice-btn dismiss" onClick={() => setBlockedEditPrompt(null)}>
+              Dismiss
+            </button>
+          </div>
+        </div>
+      )}
 
       {/* Bottom Input Card */}
       {!hideInputCard && (
@@ -1197,34 +1620,74 @@ No project is loaded. Tell the user to open a project folder so you can see thei
             )}
             {isAIProcessing && (
               <div className="ai-processing-indicator">
-                <span>AI thinking</span>
+                <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                  <circle cx="12" cy="12" r="3" />
+                  <path d="M12 1v4m0 14v4M4.22 4.22l2.83 2.83m9.9 9.9l2.83 2.83M1 12h4m14 0h4M4.22 19.78l2.83-2.83m9.9-9.9l2.83-2.83" />
+                </svg>
+                <span>AI is thinking</span>
                 <div className="ai-processing-dots">
                   <span></span>
                   <span></span>
                   <span></span>
                 </div>
+                <span className="ai-processing-elapsed">{formatElapsed(aiElapsedSec)}</span>
+                <button
+                  type="button"
+                  className="ai-stop-btn"
+                  onClick={handleStopAIResponse}
+                  disabled={isAIStopping}
+                  title="Stop AI response"
+                >
+                  {isAIStopping ? 'Stopping…' : 'Stop'}
+                </button>
               </div>
             )}
             {inputMode !== 'ai' && !isAIProcessing && (
               <>
-                <div className="version-badge">
+                <div className="terminal-mode-indicator">
                   <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-                    <circle cx="12" cy="12" r="10" />
+                    <polyline points="4 17 10 11 4 5" />
+                    <line x1="12" y1="19" x2="20" y2="19" />
                   </svg>
-                  <span>v24.12.0</span>
+                  <span>Terminal Mode</span>
                 </div>
-                <div className="path-badge">
+                <div className="terminal-meta-chip path">
                   <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
                     <path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z" />
                   </svg>
                   <span>~/{cwd?.split('/').pop() || 'Vexilo/Velix'}</span>
                 </div>
+                <button
+                  type="button"
+                  className={`terminal-meta-chip terminal-git-chip git ${totalChanges > 0 ? 'dirty' : 'clean'}`}
+                  onClick={() => onOpenGitPanel?.()}
+                  title="Open Git changes"
+                >
+                  <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                    <line x1="6" y1="3" x2="6" y2="15" />
+                    <circle cx="18" cy="6" r="3" />
+                    <circle cx="6" cy="18" r="3" />
+                    <path d="M18 9a9 9 0 0 1-9 9" />
+                  </svg>
+                  <span>
+                    {totalChanges > 0
+                      ? `${totalChanges} change${totalChanges !== 1 ? 's' : ''}`
+                      : 'Clean'}
+                  </span>
+                </button>
               </>
             )}
           </div>
 
+          {/* Animated loading bar - shown while AI is processing */}
+          {isAIProcessing && (
+            <div className="ai-loading-bar">
+              <div className="ai-loading-bar-fill" />
+            </div>
+          )}
+
           {/* Card Header Row 2 - Git Stats or AI hints */}
-          {inputMode === 'ai' ? (
+          {isAIProcessing ? null : inputMode === 'ai' ? (
             <div className="card-git-row" style={{ justifyContent: 'space-between' }}>
               <span style={{ opacity: 0.7, fontSize: '11px' }}>
                 {currentFile
@@ -1233,6 +1696,9 @@ No project is loaded. Tell the user to open a project folder so you can see thei
                 }
               </span>
               <div style={{ display: 'flex', gap: '10px', alignItems: 'center' }}>
+                <span style={{ opacity: 0.6, fontSize: '10px' }}>
+                  {editModeEnabled ? 'Edit Mode: ON' : 'Edit Mode: OFF (approval required)'}
+                </span>
                 <span style={{ opacity: 0.5, fontSize: '10px' }}>
                   Ctrl+T: Terminal | Ctrl+A: AI | Tab: Toggle
                 </span>
@@ -1250,21 +1716,29 @@ No project is loaded. Tell the user to open a project folder so you can see thei
               </div>
             </div>
           ) : (
-            <div className="card-git-row">
-              <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-                <line x1="6" y1="3" x2="6" y2="15" />
-                <circle cx="18" cy="6" r="3" />
-                <circle cx="6" cy="18" r="3" />
-                <path d="M18 9a9 9 0 0 1-9 9" />
-              </svg>
-              <span className="branch-name">master</span>
-              <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-                <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" />
-                <polyline points="14 2 14 8 20 8" />
-              </svg>
-              <span className="file-count">{gitChanges.length} ·</span>
-              <span className="stat-added">+{totalAdded}</span>
-              <span className="stat-removed">-{totalRemoved}</span>
+            <div className="terminal-mode-row">
+              <button
+                type="button"
+                className="terminal-mode-summary terminal-mode-summary-btn"
+                onClick={() => onOpenGitPanel?.()}
+                title="Open Git changes"
+              >
+                <span className="terminal-mode-summary-title">
+                  {totalChanges > 0
+                    ? `${totalChanges} working tree change${totalChanges !== 1 ? 's' : ''}`
+                    : 'Working tree clean'}
+                </span>
+                <span className="terminal-mode-summary-subtitle">
+                  {gitDetailParts.length > 0
+                    ? gitDetailParts.join(' · ')
+                    : 'Run shell commands directly in this terminal'}
+                </span>
+              </button>
+              <div className="terminal-shortcut-row">
+                <span className="terminal-shortcut-chip">Enter: Run</span>
+                <span className="terminal-shortcut-chip">Tab: Toggle AI</span>
+                <span className="terminal-shortcut-chip">Ctrl+A: AI</span>
+              </div>
             </div>
           )}
 
@@ -1273,11 +1747,13 @@ No project is loaded. Tell the user to open a project folder so you can see thei
             type="text"
             className="card-main-input"
             placeholder={
-              inputMode === 'ai'
-                ? (currentFile
+              isAIProcessing
+                ? "Waiting for AI response..."
+                : inputMode === 'ai'
+                  ? (currentFile
                     ? `Ask about ${currentFile.path.split('/').pop()} or any code question...`
                     : "Ask AI anything... e.g. How do I fix this error?")
-                : "Type a command or ask AI anything..."
+                  : "Run a shell command... (Tab to switch to AI)"
             }
             ref={inputRef}
             value={inputValue}
@@ -1387,6 +1863,43 @@ No project is loaded. Tell the user to open a project folder so you can see thei
                 <line x1="8" y1="23" x2="16" y2="23" />
               </svg>
             </button>
+            <button
+              type="button"
+              className={`edit-mode-btn ${editModeEnabled ? 'on' : 'off'}`}
+              onClick={toggleEditMode}
+              title={
+                editModeEnabled
+                  ? "Edit Mode ON - AI can propose edits without pre-approval"
+                  : "Edit Mode OFF - AI must ask before proposing edits"
+              }
+            >
+              <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                <rect x="5" y="11" width="14" height="10" rx="2" />
+                {editModeEnabled ? (
+                  <path d="M9 11V8a4 4 0 0 1 7.5-2" />
+                ) : (
+                  <path d="M8 11V8a4 4 0 0 1 8 0v3" />
+                )}
+              </svg>
+              <span>Edit {editModeEnabled ? 'ON' : 'OFF'}</span>
+            </button>
+
+            {reviewFileChanges.length > 0 && (
+              <button
+                type="button"
+                className="review-files-btn"
+                onClick={handleOpenReviewPanel}
+                title="Review AI-applied file changes"
+              >
+                <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                  <path d="M3 3h7v7H3z" />
+                  <path d="M14 3h7v7h-7z" />
+                  <path d="M14 14h7v7h-7z" />
+                  <path d="M3 14h7v7H3z" />
+                </svg>
+                <span>Review files ({reviewFileChanges.length})</span>
+              </button>
+            )}
 
             {/* Model picker */}
             <div className="model-picker-wrap" ref={modelPickerRef}>
@@ -1410,33 +1923,39 @@ No project is loaded. Tell the user to open a project folder so you can see thei
 
               {showModelPicker && (
                 <div className="model-picker-dropdown">
-                  {PROVIDERS.map(provider => (
-                    <div key={provider.id} className="model-picker-group">
-                      <div className="model-picker-group-label">{provider.name}</div>
-                      {provider.models.map(model => {
-                        const isActive = currentAIConfig.provider === provider.id && currentAIConfig.model === model;
-                        return (
-                          <button
-                            key={model}
-                            type="button"
-                            className={`model-picker-item ${isActive ? 'active' : ''}`}
-                            onClick={() => {
-                              aiService.setProvider(provider.id, model);
-                              setCurrentAIConfig({ provider: provider.id, model });
-                              setShowModelPicker(false);
-                            }}
-                          >
-                            <span className="model-picker-item-name">{model}</span>
-                            {isActive && (
-                              <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5">
-                                <polyline points="20 6 9 17 4 12" />
-                              </svg>
-                            )}
-                          </button>
-                        );
-                      })}
-                    </div>
-                  ))}
+                  {PROVIDERS.map(provider => {
+                    // Check if provider is configured
+                    const isConfigured = aiService.isProviderReady(provider.id);
+                    return (
+                      <div key={provider.id} className="model-picker-group">
+                        <div className="model-picker-group-label">{provider.name}</div>
+                        {provider.models.map(model => {
+                          const isActive = currentAIConfig.provider === provider.id && currentAIConfig.model === model;
+                          return (
+                            <button
+                              key={model}
+                              type="button"
+                              className={`model-picker-item ${isActive ? 'active' : ''} ${!isConfigured ? 'unconfigured' : ''}`}
+                              disabled={!isConfigured}
+                              onClick={() => {
+                                if (!isConfigured) return;
+                                aiService.setProvider(provider.id, model);
+                                setCurrentAIConfig({ provider: provider.id, model });
+                                setShowModelPicker(false);
+                              }}
+                            >
+                              <span className="model-picker-item-name">{model}{isConfigured ? '' : ' - Setup Required'}</span>
+                              {isActive && (
+                                <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5">
+                                  <polyline points="20 6 9 17 4 12" />
+                                </svg>
+                              )}
+                            </button>
+                          );
+                        })}
+                      </div>
+                    )
+                  })}
                 </div>
               )}
             </div>

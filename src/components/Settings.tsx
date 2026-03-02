@@ -1,78 +1,153 @@
 import { useState, useEffect } from "react";
-import { invoke } from "@tauri-apps/api/core";
+import { invoke } from "../platform/native";
 import "./Settings.css";
 
 export interface AIProvider {
-    id: "claude" | "chatgpt" | "gemini" | "glm4" | "minimax" | "zen" | "kimi" | "deepseek" | "groq";
+    id: "claude" | "chatgpt" | "gemini" | "glm4" | "minimax" | "kimi" | "deepseek" | "groq" | "mistral";
     name: string;
     models: string[];
     placeholder: string;
     isFree?: boolean;
     description?: string;
+    apiKeySteps?: string[];
+    apiKeyUrl?: string;
 }
 
 export const AI_PROVIDERS: AIProvider[] = [
     {
         id: "claude",
         name: "Claude (Anthropic)",
-        models: ["claude-sonnet-4-5", "claude-opus-4-6", "claude-haiku-4-5"],
-        placeholder: "sk-ant-..."
+        models: ["claude-sonnet-4-6", "claude-opus-4-6", "claude-haiku-4-5"],
+        placeholder: "sk-ant-...",
+        apiKeyUrl: "https://console.anthropic.com",
+        apiKeySteps: [
+            "Go to console.anthropic.com",
+            "Sign up or log in to your Anthropic account",
+            "Click \"API Keys\" in the left sidebar",
+            "Click \"Create Key\" and give it a name",
+            "Copy the key — it starts with sk-ant-",
+        ]
     },
     {
         id: "chatgpt",
         name: "ChatGPT (OpenAI)",
         models: ["gpt-4o", "gpt-4-turbo", "gpt-3.5-turbo", "o3", "o4-mini"],
-        placeholder: "sk-..."
+        placeholder: "sk-...",
+        apiKeyUrl: "https://platform.openai.com/api-keys",
+        apiKeySteps: [
+            "Go to platform.openai.com",
+            "Sign up or log in to your OpenAI account",
+            "Click your profile icon → \"API keys\"",
+            "Click \"Create new secret key\" and name it",
+            "Copy the key immediately — it starts with sk- and won't be shown again",
+        ]
     },
     {
         id: "gemini",
         name: "Gemini (Google)",
         models: ["gemini-2.5-pro", "gemini-2.0-flash", "gemini-1.5-pro", "gemini-1.5-flash"],
-        placeholder: "AIza..."
+        placeholder: "AIza...",
+        apiKeyUrl: "https://aistudio.google.com/apikey",
+        apiKeySteps: [
+            "Go to aistudio.google.com",
+            "Sign in with your Google account",
+            "Click \"Get API key\" in the top-left area",
+            "Click \"Create API key in new project\" (or select an existing project)",
+            "Copy the generated key — it starts with AIza",
+        ]
     },
     {
-        id: "glm4",
-        name: "GLM (Z.AI Coding Plan)",
-        models: ["glm-4.7", "glm-4.5", "glm-4-flash"],
-        placeholder: "zai-...",
-        description: "GLM-4.7 — flagship open-source coding model ($3/mo coding plan)"
-    },
-    {
-        id: "minimax",
-        name: "MiniMax",
-        models: ["MiniMax-M2.5", "MiniMax-M2.1"],
-        placeholder: "eyJ...",
-        description: "MiniMax M2.5 — strong multi-language coding model"
-    },
-    {
-        id: "zen",
-        name: "OpenCode Zen (Free Models)",
-        models: ["glm-5-free", "minimax-m2.5-free", "kimi-k2.5-free", "big-pickle"],
-        placeholder: "opencode-...",
+        id: "mistral",
+        name: "Mistral AI",
+        models: ["mistral-small-latest", "open-mistral-nemo", "codestral-latest"],
+        placeholder: "...",
         isFree: true,
-        description: "Free models via OpenCode Zen gateway — GLM 5, MiniMax M2.5, Kimi K2.5, Big Pickle"
-    },
-    {
-        id: "kimi",
-        name: "Kimi (Moonshot AI)",
-        models: ["kimi-k2", "moonshot-v1-32k", "moonshot-v1-128k"],
-        placeholder: "sk-...",
-        description: "Kimi K2 — strong reasoning and coding model"
-    },
-    {
-        id: "deepseek",
-        name: "DeepSeek",
-        models: ["deepseek-chat", "deepseek-reasoner"],
-        placeholder: "sk-...",
-        description: "DeepSeek — cost-effective models with strong reasoning"
+        description: "Free tier available — Mistral Small & Nemo are free with no credit card required",
+        apiKeyUrl: "https://console.mistral.ai/api-keys",
+        apiKeySteps: [
+            "Go to console.mistral.ai",
+            "Sign up for free — no credit card required for the free tier",
+            "Click \"API keys\" in the left navigation panel",
+            "Click \"Create new key\" and give it a name",
+            "Copy the key before closing the dialog — it won't be shown again",
+        ]
     },
     {
         id: "groq",
         name: "Groq (Fast Inference)",
         models: ["llama-3.3-70b-versatile", "llama-3.1-8b-instant", "mixtral-8x7b-32768", "gemma2-9b-it"],
         placeholder: "gsk_...",
-        description: "Ultra-fast inference for open-source models"
-    }
+        isFree: true,
+        description: "Free tier available — ultra-fast inference for open-source models, no credit card required",
+        apiKeyUrl: "https://console.groq.com/keys",
+        apiKeySteps: [
+            "Go to console.groq.com",
+            "Sign up for free — no credit card required",
+            "Click \"API Keys\" in the left sidebar",
+            "Click \"Create API Key\" and give it a name",
+            "Copy the key — it starts with gsk_",
+        ]
+    },
+    {
+        id: "deepseek",
+        name: "DeepSeek",
+        models: ["deepseek-chat", "deepseek-reasoner"],
+        placeholder: "sk-...",
+        description: "DeepSeek — cost-effective models with strong reasoning",
+        apiKeyUrl: "https://platform.deepseek.com/api_keys",
+        apiKeySteps: [
+            "Go to platform.deepseek.com",
+            "Sign up or log in to your DeepSeek account",
+            "Click \"API Keys\" in the left sidebar",
+            "Click \"Create API Key\" and give it a name",
+            "Copy the key — it starts with sk-",
+        ]
+    },
+    {
+        id: "kimi",
+        name: "Kimi (Moonshot AI)",
+        models: ["kimi-k2", "moonshot-v1-32k", "moonshot-v1-128k"],
+        placeholder: "sk-...",
+        description: "Kimi K2 — strong reasoning and coding model",
+        apiKeyUrl: "https://platform.moonshot.cn/console/api-keys",
+        apiKeySteps: [
+            "Go to platform.moonshot.cn",
+            "Sign up or log in to your Moonshot account",
+            "Click \"API Keys\" in the console sidebar",
+            "Click \"New API Key\" and give it a name",
+            "Copy the key — it starts with sk-",
+        ]
+    },
+    {
+        id: "glm4",
+        name: "GLM (Z.AI Coding Plan)",
+        models: ["glm-4.7", "glm-4.5", "glm-4-flash"],
+        placeholder: "zai-...",
+        description: "GLM-4.7 — flagship open-source coding model ($3/mo coding plan)",
+        apiKeyUrl: "https://bigmodel.cn",
+        apiKeySteps: [
+            "Go to bigmodel.cn (Z.AI platform)",
+            "Sign up or log in to your account",
+            "Navigate to the API Keys section in the console",
+            "Create a new API key",
+            "Copy the key — it starts with zai-",
+        ]
+    },
+    {
+        id: "minimax",
+        name: "MiniMax",
+        models: ["MiniMax-M2.5", "MiniMax-M2.1"],
+        placeholder: "eyJ...",
+        description: "MiniMax M2.5 — strong multi-language coding model",
+        apiKeyUrl: "https://platform.minimaxi.com",
+        apiKeySteps: [
+            "Go to platform.minimaxi.com",
+            "Sign up or log in to your MiniMax account",
+            "Click \"API Key\" in the left sidebar",
+            "Click \"Create\" to generate a new API key",
+            "Copy the key — it starts with eyJ",
+        ]
+    },
 ];
 
 interface SettingsProps {
@@ -92,8 +167,8 @@ export interface AIConfig {
     apiKey: string;
 }
 
-// Free providers that don't strictly require an API key (optional/account key)
-const FREE_PROVIDERS = new Set(["zen"]);
+// Free providers that don't strictly require a paid plan
+const FREE_PROVIDERS = new Set(["groq", "mistral"]);
 
 export function Settings({ isOpen, onClose, onSave, currentConfig, theme, onThemeChange, tabSize, onTabSizeChange }: SettingsProps) {
     const [activeTab, setActiveTab] = useState<"providers" | "appearance" | "about">("providers");
@@ -101,6 +176,7 @@ export function Settings({ isOpen, onClose, onSave, currentConfig, theme, onThem
     const [apiKeys, setApiKeys] = useState<Record<string, string>>({});
     const [selectedModels, setSelectedModels] = useState<Record<string, string>>({});
     const [showKeys, setShowKeys] = useState<Record<string, boolean>>({});
+    const [showSteps, setShowSteps] = useState<Record<string, boolean>>({});
 
     useEffect(() => {
         loadApiKeys();
@@ -223,9 +299,38 @@ export function Settings({ isOpen, onClose, onSave, currentConfig, theme, onThem
 
                                         <div className="provider-config">
                                             <div className="input-group">
-                                                <label>
-                                                    {FREE_PROVIDERS.has(provider.id) ? "API Key (optional — get from opencode.ai)" : "API Key"}
-                                                </label>
+                                                <div className="api-key-label-row">
+                                                    <label>API Key</label>
+                                                    {provider.apiKeySteps && (
+                                                        <button
+                                                            className="how-to-get-key-btn"
+                                                            onClick={() => setShowSteps(prev => ({ ...prev, [provider.id]: !prev[provider.id] }))}
+                                                        >
+                                                            {showSteps[provider.id] ? "Hide steps" : "How to get this key"}
+                                                        </button>
+                                                    )}
+                                                </div>
+
+                                                {provider.apiKeySteps && showSteps[provider.id] && (
+                                                    <div className="api-key-steps">
+                                                        <ol className="steps-list">
+                                                            {provider.apiKeySteps.map((step, i) => (
+                                                                <li key={i}>{step}</li>
+                                                            ))}
+                                                        </ol>
+                                                        {provider.apiKeyUrl && (
+                                                            <a
+                                                                className="steps-open-link"
+                                                                href={provider.apiKeyUrl}
+                                                                target="_blank"
+                                                                rel="noopener noreferrer"
+                                                            >
+                                                                Open {provider.name} console →
+                                                            </a>
+                                                        )}
+                                                    </div>
+                                                )}
+
                                                 <div className="key-input-wrapper">
                                                     <input
                                                         type={showKeys[provider.id] ? "text" : "password"}

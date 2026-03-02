@@ -5,7 +5,7 @@
  * for 20+ programming languages.
  */
 
-import { readDir, readTextFile } from "@tauri-apps/plugin-fs";
+import { readDir, readTextFile } from "../../platform/native";
 
 // File extension to language mapping
 const EXT_TO_LANGUAGE: Record<string, string> = {

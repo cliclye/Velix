@@ -1,23 +1,25 @@
-import { invoke } from '@tauri-apps/api/core';
+import { invoke } from '../../platform/native';
 import { ProviderID, PROVIDERS } from './types';
 import { opencodeClient } from './opencode-client';
 
 /**
  * AIService provides a unified interface to multiple AI providers.
- * All AI inference is now routed through the opencode server (velixcode engine),
- * which supports 24+ providers via Vercel's ai-sdk.
+ * All AI inference is routed directly to provider APIs via Electron IPC,
+ * with no intermediate server required.
  */
 export class AIService {
     private currentProvider: ProviderID = 'claude';
-    private currentModel: string = 'claude-sonnet-4-5';
-    /** sessionID for the active opencode session */
+    private currentModel: string = 'claude-sonnet-4-6';
+    /** Active session ID for the current conversation */
     private sessionID: string | null = null;
-    /** Track which providers have been authenticated with opencode */
-    private authenticatedProviders: Set<ProviderID> = new Set();
+    /** In-memory message history per session (for multi-turn conversations) */
+    private sessionHistory: Map<string, Array<{ role: string; content: string }>> = new Map();
+    /** API keys stored per provider */
+    private storedKeys: Map<ProviderID, string> = new Map();
 
     /**
      * Initialize the service with a specific provider and model.
-     * Loads the saved API key and registers it with the opencode server.
+     * Loads the saved API key from the backend.
      */
     async initialize(provider: ProviderID, model?: string): Promise<boolean> {
         this.currentProvider = provider;
@@ -27,7 +29,7 @@ export class AIService {
         try {
             const apiKey = await invoke<string>('get_api_key', { provider });
             if (apiKey) {
-                await this._registerApiKey(provider, apiKey);
+                this.storedKeys.set(provider, apiKey);
                 return true;
             }
         } catch {
@@ -38,52 +40,21 @@ export class AIService {
 
     /**
      * Set the API key for a provider.
-     * Persists it via Tauri backend and registers it with the opencode server.
+     * Persists it via the backend and stores it in memory for requests.
      */
     async setApiKey(provider: ProviderID, apiKey: string): Promise<void> {
         await invoke('save_api_key', { provider, key: apiKey });
-        await this._registerApiKey(provider, apiKey);
-    }
-
-    /** Register an API key with the opencode server */
-    private async _registerApiKey(provider: ProviderID, apiKey: string): Promise<void> {
-        try {
-            await opencodeClient.setAuth(provider, apiKey);
-            this.authenticatedProviders.add(provider);
-        } catch (e) {
-            // Server might not be ready yet; will be retried when server starts
-            console.warn(`Could not register ${provider} key with opencode server:`, e);
-        }
-    }
-
-    /**
-     * Ensure we have a valid opencode session.
-     * Creates a new one if needed.
-     */
-    private async ensureSession(): Promise<string> {
-        if (!this.sessionID) {
-            this.sessionID = await opencodeClient.createSession();
-        }
-        return this.sessionID;
-    }
-
-    /** Reset the current session (creates a fresh one on next chat) */
-    private resetSession(): void {
-        if (this.sessionID) {
-            opencodeClient.deleteSession(this.sessionID).catch(() => {});
-        }
-        this.sessionID = null;
+        this.storedKeys.set(provider, apiKey);
     }
 
     /**
      * Switch to a different provider and model.
-     * Resets the session so the next chat starts fresh.
+     * Resets the conversation session so the next chat starts fresh.
      */
     setProvider(provider: ProviderID, model?: string): void {
         this.currentProvider = provider;
         const providerConfig = PROVIDERS.find(p => p.id === provider);
         this.currentModel = model || providerConfig?.models[0] || '';
-        // Reset session when switching providers so the new model is used
         this.resetSession();
     }
 
@@ -95,16 +66,35 @@ export class AIService {
         };
     }
 
-    /** Check if a provider is ready (has been authenticated with opencode) */
+    /** Check if a provider has an API key configured */
     isProviderReady(provider?: ProviderID): boolean {
         const p = provider || this.currentProvider;
-        return this.authenticatedProviders.has(p);
+        return this.storedKeys.has(p);
+    }
+
+    /** Abort active generation — no-op in direct mode (no server to abort) */
+    async abortCurrentResponse(): Promise<void> {}
+
+    /** Ensure we have an active session ID */
+    private async ensureSession(): Promise<string> {
+        if (!this.sessionID) {
+            this.sessionID = await opencodeClient.createSession();
+            this.sessionHistory.set(this.sessionID, []);
+        }
+        return this.sessionID;
+    }
+
+    /** Reset the current session (creates a fresh one on next chat) */
+    private resetSession(): void {
+        if (this.sessionID) {
+            this.sessionHistory.delete(this.sessionID);
+        }
+        this.sessionID = null;
     }
 
     /**
-     * Send a chat message via the opencode server.
-     * Extracts the system prompt and user message from the messages array.
-     * Supports real streaming via SSE when onStream is provided.
+     * Send a chat message to the current AI provider.
+     * Maintains conversation history for multi-turn context.
      */
     async chat(messages: Array<{ role: string; content: string }>, options?: {
         model?: string;
@@ -114,10 +104,16 @@ export class AIService {
         onStream?: (chunk: string) => void;
         fileContext?: { path: string; language: string; content: string };
         projectContents?: Record<string, string>;
+        tools?: Record<string, boolean>;
+        signal?: AbortSignal;
     }): Promise<{ content: string; model: string; provider: string; usage: { promptTokens: number; completionTokens: number; totalTokens: number } }> {
         const model = options?.model || this.currentModel;
+        const apiKey = this.storedKeys.get(this.currentProvider);
+        if (!apiKey) {
+            throw new Error(`No API key configured for provider "${this.currentProvider}". Add one in Settings.`);
+        }
 
-        // Extract system prompt and user message from messages array
+        // Extract system prompt and latest user message
         const systemMsg = messages.find(m => m.role === 'system');
         const userMsg = messages.filter(m => m.role === 'user').pop();
 
@@ -130,7 +126,7 @@ export class AIService {
         // Append project/file context to the system prompt if provided
         if (options?.projectContents && Object.keys(options.projectContents).length > 0) {
             const fileSnippet = Object.entries(options.projectContents)
-                .slice(0, 30) // Limit to first 30 files
+                .slice(0, 30)
                 .map(([path, content]) => {
                     const ext = path.split('.').pop() || 'text';
                     return `--- ${path} ---\n\`\`\`${ext}\n${content.slice(0, 3000)}\n\`\`\``;
@@ -144,8 +140,8 @@ export class AIService {
                 `\n\n=== CURRENT FILE: ${fc.path} ===\n\`\`\`${fc.language}\n${fc.content.slice(0, 15000)}\n\`\`\``;
         }
 
-        // Update directory in the client for project-aware responses
         const sessionID = await this.ensureSession();
+        const history = this.sessionHistory.get(sessionID) ?? [];
 
         const responseText = await opencodeClient.sendMessage({
             sessionID,
@@ -153,8 +149,16 @@ export class AIService {
             system: systemPrompt,
             velixProviderID: this.currentProvider,
             velixModelID: model,
+            apiKey,
+            messageHistory: history,
             onStream: options?.stream ? options.onStream : undefined,
+            signal: options?.signal,
         });
+
+        // Update in-memory history for next turn
+        history.push({ role: 'user', content: userMsg.content });
+        history.push({ role: 'assistant', content: responseText });
+        this.sessionHistory.set(sessionID, history);
 
         return {
             content: responseText,
@@ -165,31 +169,31 @@ export class AIService {
     }
 
     /**
-     * Send a one-shot message in a throwaway session (no history accumulation).
-     * Used for autocomplete, error explanation, and other stateless queries.
+     * Send a one-shot message without accumulating conversation history.
+     * Used for stateless tasks like autocomplete, error explanation, etc.
      */
     private async oneShotChat(system: string, userContent: string): Promise<string> {
-        let tempSessionID: string | null = null;
+        const apiKey = this.storedKeys.get(this.currentProvider);
+        if (!apiKey) {
+            throw new Error(`No API key configured for provider "${this.currentProvider}". Add one in Settings.`);
+        }
+
+        const tempSessionID = await opencodeClient.createSession();
         try {
-            tempSessionID = await opencodeClient.createSession();
-            const result = await opencodeClient.sendMessage({
+            return await opencodeClient.sendMessage({
                 sessionID: tempSessionID,
                 text: userContent,
                 system,
                 velixProviderID: this.currentProvider,
                 velixModelID: this.currentModel,
+                apiKey,
             });
-            return result;
         } finally {
-            if (tempSessionID) {
-                opencodeClient.deleteSession(tempSessionID).catch(() => {});
-            }
+            await opencodeClient.deleteSession(tempSessionID);
         }
     }
 
-    /**
-     * Suggest a shell command based on natural language description.
-     */
+    /** Suggest a shell command based on a natural language description. */
     async suggestCommand(description: string): Promise<string> {
         const result = await this.oneShotChat(
             'You are a shell command expert. Given a task description, respond with ONLY the shell command, nothing else. No explanation, no markdown, just the raw command.',
@@ -198,9 +202,7 @@ export class AIService {
         return result.trim();
     }
 
-    /**
-     * Explain an error and suggest fixes.
-     */
+    /** Explain an error and suggest fixes. */
     async explainError(command: string, error: string): Promise<string> {
         return this.oneShotChat(
             'You are a helpful terminal assistant. Explain errors concisely and suggest fixes. Keep responses brief and practical.',
@@ -208,9 +210,7 @@ export class AIService {
         );
     }
 
-    /**
-     * Edit a file based on natural language instruction.
-     */
+    /** Edit a file based on a natural language instruction. */
     async editFile(path: string, content: string, instruction: string): Promise<string> {
         const newContent = await this.oneShotChat(
             `You are an expert code editor. You will receive the content of a file and an instruction to modify it.
@@ -228,9 +228,7 @@ Just the raw code.`,
         return cleaned;
     }
 
-    /**
-     * Analyze a code file and return explanation.
-     */
+    /** Analyze a code file and return an explanation. */
     async analyzeCode(options: {
         filePath: string;
         code: string;
@@ -244,9 +242,7 @@ Just the raw code.`,
         return this.oneShotChat(CODE_ANALYSIS_SYSTEM_PROMPT, prompt);
     }
 
-    /**
-     * Analyze a project and return overview.
-     */
+    /** Analyze a project and return an overview. */
     async analyzeProject(options: {
         projectData: import('../analysis').ProjectData;
         filesContent: Array<{ path: string; content: string; imports: string[] }>;
@@ -275,9 +271,8 @@ Just the raw code.`,
 Return ONLY a JSON array of exactly ${count} strings. No markdown, no explanation. Example: ["prompt 1", "prompt 2"]`,
             `Goal: ${goal}\n\nGenerate exactly ${count} distinct prompts for ${count} Claude Code agents. Return a JSON array only.`
         );
-        const result = { content: raw };
 
-        let content = result.content.trim();
+        let content = raw.trim();
         if (content.startsWith('```')) {
             content = content.replace(/^```\w*\n?/, '').replace(/\n?```$/, '');
         }
@@ -293,9 +288,7 @@ Return ONLY a JSON array of exactly ${count} strings. No markdown, no explanatio
         }
     }
 
-    /**
-     * Analyze the complexity of a task and suggest agent count.
-     */
+    /** Analyze the complexity of a task and suggest agent count. */
     async analyzeTaskComplexity(goal: string): Promise<{ complexity: number; agentCount: number; reasoning: string }> {
         const raw = await this.oneShotChat(
             `You are an expert project manager. Analyze the given coding task and determine its complexity on a scale of 1-10.
@@ -312,10 +305,9 @@ Return ONLY a JSON object with this format:
 }`,
             `Task: ${goal}`
         );
-        const result = { content: raw };
 
         try {
-            let content = result.content.trim();
+            let content = raw.trim();
             if (content.startsWith('```')) {
                 content = content.replace(/^```\w*\n?/, '').replace(/\n?```$/, '');
             }
@@ -330,9 +322,7 @@ Return ONLY a JSON object with this format:
         }
     }
 
-    /**
-     * Chat about code with context.
-     */
+    /** Chat about code with context. */
     async chatAboutCode(options: {
         question: string;
         filePath?: string;

@@ -1,174 +1,202 @@
-/* AgentTerminal - Visual terminal display for swarm agents */
+/* AgentTerminal — Interactive CLI agent card */
 
 .agent-terminal {
   display: flex;
   flex-direction: column;
-  height: 100%;
-  background: var(--bg-primary);
+  background: var(--bg-secondary);
   border: 1px solid var(--border-default);
   border-radius: 8px;
   overflow: hidden;
   font-family: var(--font-mono);
   font-size: 12px;
-  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.1);
+  flex-shrink: 0;
+  transition: border-color 0.15s;
 }
 
+.agent-terminal:hover {
+  border-color: var(--border-hover, var(--accent-primary));
+}
+
+.agent-terminal.finished {
+  opacity: 0.75;
+}
+
+/* ── Header ─────────────────────────────────────── */
 .terminal-header {
   display: flex;
-  justify-content: space-between;
   align-items: center;
-  padding: 8px 12px;
-  background: var(--bg-secondary);
+  justify-content: space-between;
+  padding: 6px 10px;
+  background: var(--bg-sidebar, var(--bg-secondary));
   border-bottom: 1px solid var(--border-default);
-  min-height: 40px;
+  min-height: 36px;
+  flex-shrink: 0;
 }
 
 .terminal-title {
   display: flex;
   align-items: center;
-  gap: 8px;
-}
-
-.agent-role {
-  color: var(--accent-color);
-  font-weight: 600;
-  font-size: 11px;
-  text-transform: uppercase;
-  letter-spacing: 0.5px;
-}
-
-.agent-id {
-  color: var(--text-secondary);
-  font-size: 10px;
-  background: var(--bg-tertiary);
-  padding: 2px 6px;
-  border-radius: 4px;
-  font-family: var(--font-mono);
-}
-
-.terminal-status {
-  display: flex;
-  align-items: center;
-  gap: 8px;
+  gap: 7px;
+  min-width: 0;
 }
 
 .status-dot {
-  width: 8px;
-  height: 8px;
+  width: 7px;
+  height: 7px;
   border-radius: 50%;
-  animation: pulse 2s infinite;
+  flex-shrink: 0;
 }
 
-.status-text {
-  font-size: 9px;
+.agent-name {
   font-weight: 600;
-  text-transform: uppercase;
-  letter-spacing: 0.5px;
+  font-size: 11px;
+  color: var(--text-primary);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
+.status-label {
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: 0.5px;
+  white-space: nowrap;
+}
+
+.terminal-actions {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  flex-shrink: 0;
+  margin-left: 8px;
+}
+
+.terminal-icon-btn {
+  background: none;
+  border: none;
+  cursor: pointer;
+  width: 22px;
+  height: 22px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 4px;
+  font-size: 14px;
+  color: var(--text-secondary);
+  transition: all 0.15s;
+  padding: 0;
+  line-height: 1;
+}
+
+.terminal-icon-btn:hover {
+  background: var(--bg-hover);
+  color: var(--text-primary);
+}
+
+.kill-btn:hover {
+  background: rgba(239, 68, 68, 0.15);
+  color: #EF4444;
+}
+
+/* ── Task Label ──────────────────────────────────── */
+.agent-task-label {
+  padding: 4px 10px;
+  font-size: 11px;
+  color: var(--text-secondary);
+  background: var(--bg-primary);
+  border-bottom: 1px solid var(--border-default);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  flex-shrink: 0;
+}
+
+/* ── Terminal Window ─────────────────────────────── */
 .terminal-window {
   flex: 1;
-  padding: 12px;
-  background: var(--bg-code);
+  padding: 8px 10px;
+  background: var(--bg-code, #0a0a0a);
   color: var(--text-primary);
-  font-family: var(--font-mono);
-  font-size: 12px;
-  line-height: 1.4;
   overflow-y: auto;
-  max-height: 200px;
+  height: 160px;
+  transition: height 0.2s ease;
+}
+
+.agent-terminal.expanded .terminal-window {
+  height: 380px;
 }
 
 .terminal-line {
+  font-size: 11px;
+  line-height: 1.45;
+  white-space: pre-wrap;
+  word-break: break-all;
+  color: #d4d4d4;
+  padding: 0;
+}
+
+.terminal-line.muted {
+  color: var(--text-secondary);
+  opacity: 0.6;
+  font-style: italic;
+}
+
+/* ── Input Row ───────────────────────────────────── */
+.terminal-input-row {
   display: flex;
   align-items: center;
-  margin-bottom: 2px;
-  min-height: 16px;
+  gap: 0;
+  border-top: 1px solid var(--border-default);
+  background: var(--bg-secondary);
+  flex-shrink: 0;
 }
 
-.prompt {
-  color: var(--accent-color);
-  margin-right: 8px;
-  font-weight: 600;
-  user-select: none;
-}
-
-.output {
+.terminal-input {
   flex: 1;
-  word-wrap: break-word;
-  white-space: pre-wrap;
-}
-
-.cursor {
-  animation: blink 1s step-end infinite;
+  background: transparent;
+  border: none;
+  padding: 6px 10px;
   color: var(--text-primary);
+  font-family: var(--font-mono);
+  font-size: 11px;
+  outline: none;
 }
 
-.cursor.visible {
-  opacity: 1;
+.terminal-input::placeholder {
+  color: var(--text-secondary);
+  opacity: 0.5;
 }
 
-.cursor.hidden {
-  opacity: 0;
+.terminal-send-btn {
+  background: none;
+  border: none;
+  border-left: 1px solid var(--border-default);
+  padding: 6px 10px;
+  color: var(--text-secondary);
+  cursor: pointer;
+  font-size: 14px;
+  transition: all 0.15s;
+  display: flex;
+  align-items: center;
+  justify-content: center;
 }
 
-@keyframes blink {
-  0%, 50% {
-    opacity: 1;
-  }
-  51%, 100% {
-    opacity: 0;
-  }
+.terminal-send-btn:hover:not(:disabled) {
+  color: var(--accent-primary);
+  background: var(--bg-hover);
 }
 
-@keyframes pulse {
-  0% {
-    opacity: 1;
-    transform: scale(1);
-  }
-  50% {
-    opacity: 0.7;
-    transform: scale(1.1);
-  }
-  100% {
-    opacity: 1;
-    transform: scale(1);
-  }
+.terminal-send-btn:disabled {
+  opacity: 0.3;
+  cursor: not-allowed;
 }
 
-/* Dark theme adjustments */
-.agent-terminal.dark {
-  background: #0C120C;
-  border-color: #2A352A;
-}
-
-.agent-terminal.dark .terminal-header {
-  background: #151A15;
-  border-color: #2A352A;
-}
-
+/* ── Dark theme overrides ────────────────────────── */
 .agent-terminal.dark .terminal-window {
-  background: #0A100A;
-  color: #E8E8E8;
+  background: #0d1117;
+  color: #e6edf3;
 }
 
-.agent-terminal.dark .prompt {
-  color: #14A0A0;
-}
-
-.agent-terminal.dark .cursor {
-  color: #E8E8E8;
-}
-
-/* Grid layout for multiple terminals */
-.agents-grid {
-  display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
-  gap: 16px;
-  margin-top: 16px;
-  width: 100%;
-}
-
-.agents-grid .agent-terminal {
-  min-height: 250px;
-  max-height: 300px;
+.agent-terminal.dark .terminal-line {
+  color: #e6edf3;
 }

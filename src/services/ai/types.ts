@@ -1,6 +1,6 @@
 // AI Provider types and interfaces
 
-export type ProviderID = 'claude' | 'chatgpt' | 'gemini' | 'glm4' | 'minimax' | 'zen' | 'kimi' | 'deepseek' | 'groq';
+export type ProviderID = 'claude' | 'chatgpt' | 'gemini' | 'glm4' | 'minimax' | 'kimi' | 'deepseek' | 'groq' | 'mistral';
 
 export interface AIProvider {
     id: ProviderID;
@@ -57,7 +57,7 @@ export const PROVIDERS: AIProvider[] = [
     {
         id: 'claude',
         name: 'Claude (Anthropic)',
-        models: ['claude-sonnet-4-5', 'claude-opus-4-6', 'claude-haiku-4-5'],
+        models: ['claude-sonnet-4-6', 'claude-opus-4-6', 'claude-haiku-4-5'],
     },
     {
         id: 'chatgpt',
@@ -80,11 +80,6 @@ export const PROVIDERS: AIProvider[] = [
         models: ['MiniMax-M2.5', 'MiniMax-M2.1'],
     },
     {
-        id: 'zen',
-        name: 'OpenCode Zen (Free Models)',
-        models: ['glm-5-free', 'minimax-m2.5-free', 'kimi-k2.5-free', 'big-pickle'],
-    },
-    {
         id: 'kimi',
         name: 'Kimi (Moonshot AI)',
         models: ['kimi-k2', 'moonshot-v1-32k', 'moonshot-v1-128k'],
@@ -98,5 +93,10 @@ export const PROVIDERS: AIProvider[] = [
         id: 'groq',
         name: 'Groq (Fast Inference)',
         models: ['llama-3.3-70b-versatile', 'llama-3.1-8b-instant', 'mixtral-8x7b-32768', 'gemma2-9b-it'],
+    },
+    {
+        id: 'mistral',
+        name: 'Mistral AI',
+        models: ['mistral-small-latest', 'open-mistral-nemo', 'codestral-latest'],
     },
 ];

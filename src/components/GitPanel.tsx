@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import { invoke } from '@tauri-apps/api/core';
+import { invoke } from '../platform/native';
 import '../styles/GitPanel.css';
 
 interface GitFileStatus {
@@ -15,10 +15,125 @@ interface GitStatusResult {
   behind: number;
 }
 
+interface SplitDiffRow {
+  kind: 'context' | 'added' | 'removed' | 'modified';
+  leftLineNum?: number;
+  rightLineNum?: number;
+  leftText: string;
+  rightText: string;
+}
+
+interface SplitDiffHunk {
+  header: string;
+  rows: SplitDiffRow[];
+}
+
 interface GitPanelProps {
   currentDir: string;
   onFileClick: (filePath: string) => void;
 }
+
+const parseUnifiedDiffToSplit = (diffText: string): SplitDiffHunk[] => {
+  const lines = diffText.split('\n');
+  const hunks: SplitDiffHunk[] = [];
+
+  let currentHunk: SplitDiffHunk | null = null;
+  let oldLine = 0;
+  let newLine = 0;
+
+  let removedBuffer: string[] = [];
+  let addedBuffer: string[] = [];
+  let removedStart = 0;
+  let addedStart = 0;
+
+  const flushBuffers = () => {
+    if (!currentHunk) return;
+    if (removedBuffer.length === 0 && addedBuffer.length === 0) return;
+
+    const maxLen = Math.max(removedBuffer.length, addedBuffer.length);
+    for (let i = 0; i < maxLen; i++) {
+      const leftText = removedBuffer[i];
+      const rightText = addedBuffer[i];
+
+      if (leftText !== undefined && rightText !== undefined) {
+        currentHunk.rows.push({
+          kind: 'modified',
+          leftLineNum: removedStart + i,
+          rightLineNum: addedStart + i,
+          leftText,
+          rightText,
+        });
+      } else if (leftText !== undefined) {
+        currentHunk.rows.push({
+          kind: 'removed',
+          leftLineNum: removedStart + i,
+          leftText,
+          rightText: '',
+        });
+      } else {
+        currentHunk.rows.push({
+          kind: 'added',
+          rightLineNum: addedStart + i,
+          leftText: '',
+          rightText: rightText ?? '',
+        });
+      }
+    }
+
+    removedBuffer = [];
+    addedBuffer = [];
+  };
+
+  for (const line of lines) {
+    const hunkMatch = line.match(/^@@\s*-(\d+)(?:,(\d+))?\s+\+(\d+)(?:,(\d+))?\s*@@/);
+    if (hunkMatch) {
+      flushBuffers();
+      if (currentHunk) hunks.push(currentHunk);
+      oldLine = parseInt(hunkMatch[1], 10);
+      newLine = parseInt(hunkMatch[3], 10);
+      currentHunk = { header: line, rows: [] };
+      continue;
+    }
+
+    if (!currentHunk) continue;
+
+    if (line.startsWith('-') && !line.startsWith('---')) {
+      if (removedBuffer.length === 0) removedStart = oldLine;
+      removedBuffer.push(line.slice(1));
+      oldLine++;
+      continue;
+    }
+
+    if (line.startsWith('+') && !line.startsWith('+++')) {
+      if (addedBuffer.length === 0) addedStart = newLine;
+      addedBuffer.push(line.slice(1));
+      newLine++;
+      continue;
+    }
+
+    if (line.startsWith(' ')) {
+      flushBuffers();
+      currentHunk.rows.push({
+        kind: 'context',
+        leftLineNum: oldLine,
+        rightLineNum: newLine,
+        leftText: line.slice(1),
+        rightText: line.slice(1),
+      });
+      oldLine++;
+      newLine++;
+      continue;
+    }
+
+    if (line.startsWith('\\')) {
+      continue;
+    }
+  }
+
+  flushBuffers();
+  if (currentHunk) hunks.push(currentHunk);
+  return hunks;
+};
 
 export const GitPanel: React.FC<GitPanelProps> = ({ currentDir, onFileClick }) => {
   const [gitStatus, setGitStatus] = useState<GitStatusResult | null>(null);
@@ -68,6 +183,21 @@ export const GitPanel: React.FC<GitPanelProps> = ({ currentDir, onFileClick }) =
     loadGitStatus();
   }, [currentDir]);
 
+  useEffect(() => {
+    if (!gitStatus || gitStatus.files.length === 0) {
+      setSelectedFile(null);
+      setDiff('');
+      return;
+    }
+
+    const stillSelected = selectedFile && gitStatus.files.some(
+      (file) => file.path === selectedFile.path && file.staged === selectedFile.staged
+    );
+    if (!stillSelected) {
+      loadDiff(gitStatus.files[0]);
+    }
+  }, [gitStatus]);
+
   const getStatusIcon = (status: string) => {
     switch (status) {
       case 'modified': return 'M';
@@ -90,26 +220,37 @@ export const GitPanel: React.FC<GitPanelProps> = ({ currentDir, onFileClick }) =
     }
   };
 
-  const renderDiff = (diffText: string) => {
-    const lines = diffText.split('\n');
-    return lines.map((line, idx) => {
-      let className = 'diff-line';
-      if (line.startsWith('+') && !line.startsWith('+++')) {
-        className += ' diff-added';
-      } else if (line.startsWith('-') && !line.startsWith('---')) {
-        className += ' diff-removed';
-      } else if (line.startsWith('@@')) {
-        className += ' diff-hunk';
-      } else if (line.startsWith('diff') || line.startsWith('index') || line.startsWith('+++') || line.startsWith('---')) {
-        className += ' diff-header';
-      }
+  const renderSplitDiff = (diffText: string) => {
+    const hunks = parseUnifiedDiffToSplit(diffText);
+    if (hunks.length === 0) {
+      return <div className="split-diff-empty">No line-level changes to display</div>;
+    }
 
-      return (
-        <div key={idx} className={className}>
-          {line || ' '}
+    return (
+      <div className="split-diff-view">
+        <div className="split-diff-head">
+          <div className="split-diff-head-col">Before</div>
+          <div className="split-diff-head-col">After</div>
         </div>
-      );
-    });
+        {hunks.map((hunk, hunkIndex) => (
+          <div key={`${hunk.header}-${hunkIndex}`} className="split-diff-hunk">
+            <div className="split-diff-hunk-header">{hunk.header}</div>
+            {hunk.rows.map((row, rowIndex) => (
+              <div key={`${hunkIndex}-${rowIndex}`} className={`split-diff-row ${row.kind}`}>
+                <div className={`split-diff-cell left ${row.kind}`}>
+                  <span className="split-diff-line-num">{row.leftLineNum ?? ''}</span>
+                  <span className="split-diff-line-text">{row.leftText || ' '}</span>
+                </div>
+                <div className={`split-diff-cell right ${row.kind}`}>
+                  <span className="split-diff-line-num">{row.rightLineNum ?? ''}</span>
+                  <span className="split-diff-line-text">{row.rightText || ' '}</span>
+                </div>
+              </div>
+            ))}
+          </div>
+        ))}
+      </div>
+    );
   };
 
   if (!currentDir) {
@@ -208,7 +349,7 @@ export const GitPanel: React.FC<GitPanelProps> = ({ currentDir, onFileClick }) =
                     </button>
                   </div>
                   <div className="diff-content">
-                    {renderDiff(diff)}
+                    {renderSplitDiff(diff)}
                   </div>
                 </div>
               )}

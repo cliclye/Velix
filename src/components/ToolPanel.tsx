@@ -11,7 +11,7 @@ import remarkGfm from 'remark-gfm';
 import { aiService } from '../services/ai';
 import { extractImports, detectDangerZones, githubService } from '../services/analysis';
 import type { GitHubFullAnalysis } from '../services/analysis';
-import { readTextFile } from '@tauri-apps/plugin-fs';
+import { readTextFile } from '../platform/native';
 import './ToolPanel.css';
 
 type ToolMode = 'analysis' | 'github' | 'chat';

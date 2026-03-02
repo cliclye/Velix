@@ -551,6 +551,82 @@
   margin: 0;
 }
 
+/* API key label row with "How to get this key" toggle */
+.api-key-label-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.how-to-get-key-btn {
+  background: none;
+  border: none;
+  cursor: pointer;
+  font-size: 11px;
+  font-family: 'JetBrains Mono', 'Fira Code', monospace;
+  color: var(--accent-primary, #0A8080);
+  padding: 0;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+  opacity: 0.8;
+  transition: opacity 0.15s ease;
+}
+
+.how-to-get-key-btn:hover {
+  opacity: 1;
+}
+
+/* Step-by-step key retrieval section */
+.api-key-steps {
+  background: var(--bg-code, #151A15);
+  border: 1px solid var(--border-light, #1F2A1F);
+  border-radius: 8px;
+  padding: 12px 14px;
+  margin-bottom: 2px;
+}
+
+.app.light .api-key-steps {
+  background: #f4f4ef;
+  border-color: #d5d5d0;
+}
+
+.steps-list {
+  margin: 0 0 10px 0;
+  padding-left: 18px;
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+}
+
+.steps-list li {
+  font-size: 12px;
+  font-family: 'JetBrains Mono', 'Fira Code', monospace;
+  color: var(--text-secondary, #B0B0B0);
+  line-height: 1.5;
+}
+
+.app.light .steps-list li {
+  color: #3d3d3d;
+}
+
+.steps-open-link {
+  display: inline-block;
+  font-size: 11px;
+  font-family: 'JetBrains Mono', 'Fira Code', monospace;
+  color: var(--accent-primary, #0A8080);
+  text-decoration: none;
+  border: 1px solid var(--accent-primary, #0A8080);
+  border-radius: 5px;
+  padding: 4px 10px;
+  transition: background 0.15s ease, color 0.15s ease;
+}
+
+.steps-open-link:hover {
+  background: var(--accent-primary, #0A8080);
+  color: #fff;
+}
+
 /* Model hint in provider cards */
 .model-hint {
   font-size: 11px;

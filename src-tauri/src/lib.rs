@@ -173,11 +173,27 @@ fn pty_create(
     let working_dir = cwd.unwrap_or_else(|| dirs_or_home());
     cmd.cwd(&working_dir);
 
-    // Set environment variables
     cmd.env("TERM", "xterm-256color");
     cmd.env("COLORTERM", "truecolor");
     cmd.env("LANG", "en_US.UTF-8");
     cmd.env("HOME", dirs_or_home());
+
+    // Inject API keys from settings into the PTY environment
+    if let Ok(settings) = state.settings.lock() {
+        if let Some(claude_key) = settings.api_keys.get("claude") {
+            cmd.env("ANTHROPIC_API_KEY", claude_key);
+        }
+        if let Some(openai_key) = settings.api_keys.get("chatgpt") {
+            cmd.env("OPENAI_API_KEY", openai_key);
+        }
+        if let Some(gemini_key) = settings.api_keys.get("gemini") {
+            cmd.env("GEMINI_API_KEY", gemini_key);
+            cmd.env("GOOGLE_API_KEY", gemini_key);
+        }
+        if let Some(deepseek_key) = settings.api_keys.get("deepseek") {
+            cmd.env("DEEPSEEK_API_KEY", deepseek_key);
+        }
+    }
 
     // Spawn the shell in the PTY
     let mut child = pair
@@ -432,7 +448,9 @@ fn dirs_or_home() -> String {
 
 /// Read all source files from a project directory. Returns relative_path -> content.
 #[tauri::command]
-fn read_project_source_files(directory: String) -> Result<std::collections::HashMap<String, String>, String> {
+fn read_project_source_files(
+    directory: String,
+) -> Result<std::collections::HashMap<String, String>, String> {
     use std::fs;
 
     let dir_path = std::path::Path::new(&directory);
@@ -441,17 +459,43 @@ fn read_project_source_files(directory: String) -> Result<std::collections::Hash
     }
 
     // Check if this looks like a project (has common project files)
-    let project_indicators = ["package.json", "Cargo.toml", "pyproject.toml", "go.mod", "pom.xml",
-        "build.gradle", "Makefile", "CMakeLists.txt", ".git", "requirements.txt"];
+    let project_indicators = [
+        "package.json",
+        "Cargo.toml",
+        "pyproject.toml",
+        "go.mod",
+        "pom.xml",
+        "build.gradle",
+        "Makefile",
+        "CMakeLists.txt",
+        ".git",
+        "requirements.txt",
+    ];
     let is_project = project_indicators.iter().any(|f| dir_path.join(f).exists());
     if !is_project {
-        return Err("Directory does not appear to be a project (no package.json, Cargo.toml, etc.)".to_string());
+        return Err(
+            "Directory does not appear to be a project (no package.json, Cargo.toml, etc.)"
+                .to_string(),
+        );
     }
 
-    let source_extensions = ["ts", "tsx", "js", "jsx", "css", "html", "json", "rs", "toml",
-        "py", "go", "java", "c", "cpp", "h", "swift", "yaml", "yml", "sh", "sql", "md"];
-    let skip_dirs = ["node_modules", ".git", "target", "dist", "build", ".next",
-        ".cache", "__pycache__", ".claude", "coverage", ".turbo"];
+    let source_extensions = [
+        "ts", "tsx", "js", "jsx", "css", "html", "json", "rs", "toml", "py", "go", "java", "c",
+        "cpp", "h", "swift", "yaml", "yml", "sh", "sql", "md",
+    ];
+    let skip_dirs = [
+        "node_modules",
+        ".git",
+        "target",
+        "dist",
+        "build",
+        ".next",
+        ".cache",
+        "__pycache__",
+        ".claude",
+        "coverage",
+        ".turbo",
+    ];
 
     let mut contents = std::collections::HashMap::new();
     let mut total_size: usize = 0;
@@ -466,7 +510,9 @@ fn read_project_source_files(directory: String) -> Result<std::collections::Hash
         source_extensions: &[&str],
         skip_dirs: &[&str],
     ) {
-        if *total_size >= max_total_size { return; }
+        if *total_size >= max_total_size {
+            return;
+        }
 
         let entries = match fs::read_dir(dir) {
             Ok(e) => e,
@@ -474,7 +520,9 @@ fn read_project_source_files(directory: String) -> Result<std::collections::Hash
         };
 
         for entry in entries.flatten() {
-            if *total_size >= max_total_size { break; }
+            if *total_size >= max_total_size {
+                break;
+            }
 
             let path = entry.path();
             let name = entry.file_name().to_string_lossy().to_string();
@@ -483,14 +531,27 @@ fn read_project_source_files(directory: String) -> Result<std::collections::Hash
                 if skip_dirs.contains(&name.as_str()) || name.starts_with('.') {
                     continue;
                 }
-                walk_dir(&path, root, contents, total_size, max_total_size, source_extensions, skip_dirs);
+                walk_dir(
+                    &path,
+                    root,
+                    contents,
+                    total_size,
+                    max_total_size,
+                    source_extensions,
+                    skip_dirs,
+                );
             } else if path.is_file() {
                 let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
-                if !source_extensions.contains(&ext) { continue; }
+                if !source_extensions.contains(&ext) {
+                    continue;
+                }
 
                 if let Ok(content) = fs::read_to_string(&path) {
-                    if content.len() > 10_000 { continue; } // Skip large files
-                    let relative = path.strip_prefix(root)
+                    if content.len() > 10_000 {
+                        continue;
+                    } // Skip large files
+                    let relative = path
+                        .strip_prefix(root)
                         .map(|p| p.to_string_lossy().to_string())
                         .unwrap_or_else(|_| name);
                     *total_size += content.len();
@@ -500,7 +561,15 @@ fn read_project_source_files(directory: String) -> Result<std::collections::Hash
         }
     }
 
-    walk_dir(dir_path, dir_path, &mut contents, &mut total_size, max_total_size, &source_extensions, &skip_dirs);
+    walk_dir(
+        dir_path,
+        dir_path,
+        &mut contents,
+        &mut total_size,
+        max_total_size,
+        &source_extensions,
+        &skip_dirs,
+    );
 
     Ok(contents)
 }
@@ -1069,27 +1138,29 @@ fn get_git_diff(repo_path: &str, file_path: &str, staged: bool) -> Result<String
 
 #[tauri::command]
 async fn ask_claude(prompt: String, state: tauri::State<'_, AppState>) -> Result<String, String> {
-    // Claude API integration - using current claude-sonnet-4-5 model
+    // Claude API integration - using current claude-sonnet-4-6 model
     // Get API key from stored settings
     let api_key = {
         let settings = state.settings.lock().map_err(|e| e.to_string())?;
-        settings
-            .api_keys
-            .get("claude")
-            .cloned()
-            .ok_or_else(|| "No Claude API key found. Please configure it in Settings.".to_string())?
+        settings.api_keys.get("claude").cloned().ok_or_else(|| {
+            "No Claude API key found. Please configure it in Settings.".to_string()
+        })?
     };
 
     let client = reqwest::Client::new();
 
     // Try to parse context from the prompt JSON
-    let request_body = if let Ok(context_data) = serde_json::from_str::<serde_json::Value>(&prompt) {
+    let request_body = if let Ok(context_data) = serde_json::from_str::<serde_json::Value>(&prompt)
+    {
         let user_prompt = context_data
             .get("prompt")
             .and_then(|p| p.as_str())
             .unwrap_or(&prompt);
 
-        if let Some(project_files) = context_data.get("project_files").and_then(|v| v.as_object()) {
+        if let Some(project_files) = context_data
+            .get("project_files")
+            .and_then(|v| v.as_object())
+        {
             // Full project context
             let mut project_snapshot = String::new();
             for (file_path, content_val) in project_files {
@@ -1116,15 +1187,24 @@ async fn ask_claude(prompt: String, state: tauri::State<'_, AppState>) -> Result
             );
 
             serde_json::json!({
-                "model": "claude-sonnet-4-5",
+                "model": "claude-sonnet-4-6",
                 "max_tokens": 8192,
                 "system": system_message,
                 "messages": [{"role": "user", "content": user_prompt}]
             })
         } else if let Some(file_context) = context_data.get("file_context") {
-            let fp = file_context.get("path").and_then(|v| v.as_str()).unwrap_or("");
-            let fl = file_context.get("language").and_then(|v| v.as_str()).unwrap_or("");
-            let fc = file_context.get("content").and_then(|v| v.as_str()).unwrap_or("");
+            let fp = file_context
+                .get("path")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            let fl = file_context
+                .get("language")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            let fc = file_context
+                .get("content")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
 
             let system_message = format!(
                 "You are an AI coding assistant. File: {}\n\n```{}\n{}\n```\n\nBe specific. Reference actual code.",
@@ -1132,21 +1212,21 @@ async fn ask_claude(prompt: String, state: tauri::State<'_, AppState>) -> Result
             );
 
             serde_json::json!({
-                "model": "claude-sonnet-4-5",
+                "model": "claude-sonnet-4-6",
                 "max_tokens": 4096,
                 "system": system_message,
                 "messages": [{"role": "user", "content": user_prompt}]
             })
         } else {
             serde_json::json!({
-                "model": "claude-sonnet-4-5",
+                "model": "claude-sonnet-4-6",
                 "max_tokens": 1024,
                 "messages": [{"role": "user", "content": user_prompt}]
             })
         }
     } else {
         serde_json::json!({
-            "model": "claude-sonnet-4-5",
+            "model": "claude-sonnet-4-6",
             "max_tokens": 1024,
             "messages": [{"role": "user", "content": &prompt}]
         })
@@ -1198,10 +1278,7 @@ fn find_bun() -> Option<String> {
         }
     }
     // Common macOS / Linux locations
-    let candidates = [
-        "/usr/local/bin/bun",
-        "/opt/homebrew/bin/bun",
-    ];
+    let candidates = ["/usr/local/bin/bun", "/opt/homebrew/bin/bun"];
     let home = std::env::var("HOME").unwrap_or_default();
     let home_bun = format!("{}/.bun/bin/bun", home);
     let mut all: Vec<&str> = candidates.to_vec();
@@ -1245,7 +1322,10 @@ fn find_opencode_dir(app: &AppHandle) -> Option<PathBuf> {
 /// Start the opencode server (velixcode engine) as a child process.
 /// The server listens on http://localhost:4096.
 #[tauri::command]
-async fn start_opencode_server(app: AppHandle, state: State<'_, AppState>) -> Result<String, String> {
+async fn start_opencode_server(
+    app: AppHandle,
+    state: State<'_, AppState>,
+) -> Result<String, String> {
     // Check if already running
     {
         let proc = state.opencode_process.lock().map_err(|e| e.to_string())?;
@@ -1255,7 +1335,8 @@ async fn start_opencode_server(app: AppHandle, state: State<'_, AppState>) -> Re
     }
 
     let bun = find_bun().ok_or_else(|| {
-        "bun runtime not found. Please install bun (https://bun.sh) to use the AI engine.".to_string()
+        "bun runtime not found. Please install bun (https://bun.sh) to use the AI engine."
+            .to_string()
     })?;
 
     let opencode_dir = find_opencode_dir(&app).ok_or_else(|| {
@@ -1319,6 +1400,7 @@ pub fn run() {
         })
         .plugin(tauri_plugin_fs::init())
         .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_notification::init())
         .plugin(tauri_plugin_http::init())
         .plugin(tauri_plugin_opener::init())
         .invoke_handler(tauri::generate_handler![

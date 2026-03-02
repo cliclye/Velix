@@ -3,8 +3,7 @@
  * Handles spawning, monitoring, and terminating agents
  */
 
-import { invoke } from '@tauri-apps/api/core';
-import { listen, UnlistenFn } from '@tauri-apps/api/event';
+import { invoke, listen, type UnlistenFn } from '../../platform/native';
 import {
   Agent,
   AgentRole,
@@ -13,6 +12,7 @@ import {
   PatternMatch,
 } from './types';
 import { SwarmEventEmitter } from './SwarmEventEmitter';
+import { aiService } from '../ai/AIService';
 
 interface PTYOutput {
   session_id: string;
@@ -217,7 +217,13 @@ export class AgentManager {
     // Build the Claude CLI command with the prompt
     const prompt = this.buildPrompt(role, task);
     const escapedPrompt = prompt.replace(/\\/g, '\\\\').replace(/"/g, '\\"');
-    const command = `claude "${escapedPrompt}"\r`;
+
+    // Pass the currently selected model if using the anthropic provider
+    const config = aiService.getConfig();
+    let command = `claude "${escapedPrompt}"\r`;
+    if (config.provider === 'claude' && config.model) {
+      command = `claude -m ${config.model} "${escapedPrompt}"\r`;
+    }
 
     // Create agent object
     const agent: Agent = {

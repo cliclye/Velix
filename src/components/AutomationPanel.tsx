@@ -15,8 +15,9 @@ interface AutomationPanelProps {
   onClose: () => void;
   theme: 'light' | 'dark';
   hasApiKey: boolean;
+  configuredProviders: Array<{ id: string; name: string }>;
   onGeneratePrompts?: (goal: string, count: number) => Promise<string[]>;
-  onWriteToTerminal?: (data: string) => void;
+  onStartAutomation?: (prompts: string[]) => void;
 }
 
 const DEFAULT_PROMPTS = [
@@ -31,8 +32,9 @@ export const AutomationPanel: React.FC<AutomationPanelProps> = ({
   onClose,
   theme,
   hasApiKey,
+  configuredProviders,
   onGeneratePrompts,
-  onWriteToTerminal,
+  onStartAutomation,
 }) => {
   const [tasks, setTasks] = useState<AutomationTask[]>([]);
   const [newTaskName, setNewTaskName] = useState('');
@@ -54,62 +56,40 @@ export const AutomationPanel: React.FC<AutomationPanelProps> = ({
     }
   };
 
-  // Start automation for a single task
-  const startTask = useCallback(async (task: AutomationTask) => {
-    if (!onWriteToTerminal) {
-      console.error("Automation: No terminal connection available");
-      return;
-    }
-
-    // Open Claude Code and pass the generated prompt
-    // We wrap the prompt in quotes and escape existing quotes
-    const escaped = task.prompt.replace(/\\/g, '\\\\').replace(/"/g, '\\"');
-    const command = `claude "${escaped}"\r`;
-
-    // Send directly to main terminal
-    onWriteToTerminal(command);
-
-    // Update status (optimistic, since we can't easily track completion from here anymore)
-    setTasks(prev => prev.map(t =>
-      t.id === task.id ? { ...t, status: 'completed' } : t
-    ));
-  }, [onWriteToTerminal]);
-
-  // Start all automation tasks
+  // Start all automation tasks - creates one terminal tab per agent
   const startAllTasks = useCallback(async () => {
-    if (!hasApiKey || !onWriteToTerminal) return;
+    if (!hasApiKey || !onStartAutomation) return;
 
-    let tasksToRun = [...tasks];
+    let promptsToRun: string[] = tasks.map(t => t.prompt);
 
-    // If no tasks and we have generatePrompts: analyze complexity then generate N prompts
-    if (tasksToRun.length === 0 && onGeneratePrompts && globalPrompt.trim()) {
+    // If no queued tasks and we have a global prompt: analyze complexity then generate N prompts
+    if (promptsToRun.length === 0 && onGeneratePrompts && globalPrompt.trim()) {
       setIsAnalyzing(true);
       setComplexityAnalysis(null);
 
-      let agentCount = numInstances;
-
       try {
-        // 1. Analyze Complexity
+        // 1. Analyze complexity to determine how many agents are needed (1-5)
         const analysis = await aiService.analyzeTaskComplexity(globalPrompt.trim());
         setComplexityAnalysis(analysis);
-        agentCount = analysis.agentCount;
-        setNumInstances(agentCount); // Update state to reflect analysis
+        const agentCount = analysis.agentCount;
+        setNumInstances(agentCount);
 
         setIsAnalyzing(false);
         setIsGeneratingPrompts(true);
 
-        // 2. Generate Prompts based on agent count
-        const prompts = await onGeneratePrompts(globalPrompt.trim(), agentCount);
-        const newTasks: AutomationTask[] = prompts.map((prompt, i) => ({
+        // 2. Generate a distinct, detailed prompt for each agent
+        promptsToRun = await onGeneratePrompts(globalPrompt.trim(), agentCount);
+
+        // Reflect prompts in the tasks list so the user can see what's being run
+        const newTasks: AutomationTask[] = promptsToRun.map((prompt, i) => ({
           id: `task-${Date.now()}-${i}`,
-          name: `Claude ${i + 1}`,
+          name: `Agent ${i + 1}`,
           prompt,
           status: 'idle' as const,
         }));
         setTasks(newTasks);
-        tasksToRun = newTasks;
       } catch (err) {
-        console.error('Failed to generate prompts:', err);
+        console.error('Automation: failed to analyze/generate prompts:', err);
         setIsAnalyzing(false);
         setIsGeneratingPrompts(false);
         return;
@@ -117,26 +97,19 @@ export const AutomationPanel: React.FC<AutomationPanelProps> = ({
       setIsGeneratingPrompts(false);
     }
 
-    if (tasksToRun.length === 0) return;
+    if (promptsToRun.length === 0) return;
 
     setIsAutomationRunning(true);
 
-    // Close the panel so the user can see the main terminal
+    // Hand off to App.tsx: it will open one terminal tab per prompt and run claude in each
+    onStartAutomation(promptsToRun);
+
+    // Close panel so the user can see the new terminals
     onClose();
 
-    // Run tasks sequentially to avoid overwhelming the single terminal
-    for (const task of tasksToRun) {
-      if (task.status === 'idle') {
-        await startTask(task);
-        // Add a small delay between tasks if we were running multiple (though ideally we just run one 'Agent' flow now)
-        await new Promise(resolve => setTimeout(resolve, 1000));
-      }
-    }
-
     setIsAutomationRunning(false);
-    // Clear tasks after running so they don't re-run
     setTasks([]);
-  }, [tasks, startTask, onGeneratePrompts, globalPrompt, numInstances, hasApiKey, onWriteToTerminal, onClose]);
+  }, [tasks, onGeneratePrompts, globalPrompt, numInstances, hasApiKey, onStartAutomation, onClose]);
 
   // Add a new task
   const addTask = useCallback(() => {
@@ -155,12 +128,11 @@ export const AutomationPanel: React.FC<AutomationPanelProps> = ({
     setNewTaskPrompt('');
   }, [newTaskName, newTaskPrompt, hasApiKey]);
 
-  // Quick add (simplified for single terminal focus)
+  // Quick add: enqueue the current global prompt as a single task
   const quickAddTasks = useCallback(() => {
     if (!hasApiKey) return;
     if (!globalPrompt.trim()) return;
 
-    // For single terminal, we usually just want one task effectively
     const newTask: AutomationTask = {
       id: `task-${Date.now()}`,
       name: 'Claude Agent',
@@ -205,9 +177,14 @@ export const AutomationPanel: React.FC<AutomationPanelProps> = ({
               className="model-select"
               disabled={isAutomationRunning || isAnalyzing}
             >
-              {PROVIDERS.flatMap(p => p.models.map(m => (
-                <option key={m} value={m}>{m} ({p.name})</option>
-              )))}
+              {PROVIDERS.flatMap(p => {
+                const isConfigured = configuredProviders.some(cp => cp.id === p.id);
+                return p.models.map(m => (
+                  <option key={m} value={m} disabled={!isConfigured}>
+                    {m} ({p.name}){isConfigured ? '' : ' - Setup Required'}
+                  </option>
+                ));
+              })}
             </select>
           </div>
         </div>
@@ -327,7 +304,7 @@ export const AutomationPanel: React.FC<AutomationPanelProps> = ({
           <button
             className="start-btn"
             onClick={startAllTasks}
-            disabled={!hasApiKey || (tasks.length === 0 && !globalPrompt.trim()) || isGeneratingPrompts || isAnalyzing}
+            disabled={!hasApiKey || !onStartAutomation || (tasks.length === 0 && !globalPrompt.trim()) || isGeneratingPrompts || isAnalyzing}
           >
             {isAnalyzing ? 'Analyzing Complexity...' : isGeneratingPrompts ? 'Generating Agents...' : 'Start Automation'}
           </button>

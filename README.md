@@ -1,11 +1,11 @@
 # Velix
 
-**Velix** is an AI-powered desktop IDE and development environment built with Tauri, React, and TypeScript. It combines a fully-featured code editor, integrated terminal, and advanced AI capabilities into a single, native application designed to supercharge your development workflow.
+**Velix** is an AI-powered desktop IDE and development environment built with React and TypeScript, with both **Tauri** and **Electron** desktop runtimes. It combines a fully-featured code editor, integrated terminal, and advanced AI capabilities into a single, native application designed to supercharge your development workflow.
 
 ## Features
 
 ### Core IDE Features
-- **Native Desktop Application** — Built with Tauri for a lightweight, fast, cross-platform experience (macOS, Windows, Linux)
+- **Native Desktop Application** — Run with either Tauri (Rust backend) or Electron (Node backend) across macOS, Windows, and Linux
 - **Integrated Terminal** — Full PTY terminal emulator with support for multiple tabs, split views, and persistent shell sessions
 - **File Explorer** — Browse, open, and manage project files with a tree-view sidebar
 - **Code Editor** — Syntax-highlighted editor with configurable tab sizes and theme support
@@ -38,7 +38,7 @@
 
 ### Prerequisites
 - [Node.js](https://nodejs.org/) (v18+)
-- [Rust](https://www.rust-lang.org/tools/install) (for Tauri)
+- [Rust](https://www.rust-lang.org/tools/install) (for Tauri runtime)
 - An API key from one of the supported AI providers (Claude, OpenAI, Gemini, or GLM4)
 
 ### Installation
@@ -51,10 +51,19 @@ cd velix
 # Install dependencies
 npm install
 
-# Run in development mode
+# Run in development mode (Tauri)
 npm run tauri dev
 
-# Build for production
+# Run in development mode (Electron)
+npm run dev:electron
+
+# Build frontend for production
+npm run build
+
+# Run desktop shell with built frontend (Electron)
+npm run electron
+
+# Build desktop app bundle (Tauri)
 npm run tauri build
 ```
 
@@ -81,6 +90,7 @@ velix/
 │   ├── components/      # UI components
 │   ├── services/        # AI, workspace, audio services
 │   └── App.tsx          # Main application
+├── electron/            # Electron main/preload runtime bridge
 ├── src-tauri/           # Rust backend (Tauri)
 └── velixcode/           # OpenCode AI engine integration
 ```
@@ -88,7 +98,7 @@ velix/
 ## Technology Stack
 
 - **Frontend**: React 19, TypeScript, Vite
-- **Backend**: Tauri 2, Rust
+- **Desktop Runtime**: Tauri 2 (Rust) and Electron (Node.js)
 - **Terminal**: xterm.js
 - **AI Engine**: OpenCode
 - **Styling**: CSS with theme variables

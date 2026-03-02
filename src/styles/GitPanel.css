@@ -378,6 +378,7 @@
 .diff-content {
   flex: 1;
   overflow-y: auto;
+  overflow-x: auto;
   padding: 12px 0;
   font-family: 'JetBrains Mono', 'Fira Code', monospace;
   font-size: 12px;
@@ -387,6 +388,163 @@
 
 .app.light .diff-content {
   background: #f8fafc;
+}
+
+.split-diff-view {
+  min-width: 820px;
+  padding-bottom: 12px;
+}
+
+.split-diff-head {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 6px;
+  padding: 0 12px 8px;
+}
+
+.split-diff-head-col {
+  font-size: 10px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.7px;
+  padding: 3px 8px;
+  border-radius: 6px;
+}
+
+.app.dark .split-diff-head-col {
+  background: rgba(90, 158, 84, 0.12);
+  color: #8dcf88;
+}
+
+.app.light .split-diff-head-col {
+  background: rgba(52, 88, 48, 0.1);
+  color: #345830;
+}
+
+.split-diff-hunk {
+  margin: 0 12px 10px;
+}
+
+.split-diff-hunk-header {
+  padding: 4px 8px;
+  margin-bottom: 4px;
+  border-radius: 6px;
+  font-size: 11px;
+  font-weight: 600;
+  font-family: 'JetBrains Mono', 'Fira Code', monospace;
+}
+
+.app.dark .split-diff-hunk-header {
+  background: rgba(90, 158, 84, 0.12);
+  color: #7cc478;
+}
+
+.app.light .split-diff-hunk-header {
+  background: rgba(52, 88, 48, 0.09);
+  color: #345830;
+}
+
+.split-diff-row {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 6px;
+}
+
+.split-diff-cell {
+  display: grid;
+  grid-template-columns: 46px 1fr;
+  align-items: start;
+  min-height: 20px;
+  border-radius: 4px;
+}
+
+.split-diff-line-num {
+  text-align: right;
+  font-size: 11px;
+  padding: 1px 6px 1px 0;
+  user-select: none;
+}
+
+.app.dark .split-diff-line-num {
+  color: rgba(230, 237, 243, 0.35);
+}
+
+.app.light .split-diff-line-num {
+  color: rgba(15, 23, 42, 0.35);
+}
+
+.split-diff-line-text {
+  white-space: pre-wrap;
+  word-break: break-word;
+  padding: 1px 8px;
+}
+
+.split-diff-row.context .split-diff-cell {
+  border: 1px solid transparent;
+}
+
+.app.dark .split-diff-row.context .split-diff-cell {
+  background: rgba(255, 255, 255, 0.015);
+}
+
+.app.light .split-diff-row.context .split-diff-cell {
+  background: rgba(15, 23, 42, 0.02);
+}
+
+.split-diff-cell.left.removed,
+.split-diff-cell.left.modified {
+  border: 1px solid rgba(255, 107, 107, 0.35);
+}
+
+.app.dark .split-diff-cell.left.removed,
+.app.dark .split-diff-cell.left.modified {
+  background: rgba(255, 107, 107, 0.12);
+  color: #ffb2b2;
+}
+
+.app.light .split-diff-cell.left.removed,
+.app.light .split-diff-cell.left.modified {
+  background: rgba(220, 38, 38, 0.09);
+  color: #b91c1c;
+}
+
+.split-diff-cell.right.added,
+.split-diff-cell.right.modified {
+  border: 1px solid rgba(63, 185, 80, 0.35);
+}
+
+.app.dark .split-diff-cell.right.added,
+.app.dark .split-diff-cell.right.modified {
+  background: rgba(63, 185, 80, 0.12);
+  color: #9be3a6;
+}
+
+.app.light .split-diff-cell.right.added,
+.app.light .split-diff-cell.right.modified {
+  background: rgba(5, 150, 105, 0.09);
+  color: #0f766e;
+}
+
+.split-diff-cell.left.added,
+.split-diff-cell.right.removed {
+  border: 1px dashed rgba(148, 163, 184, 0.28);
+}
+
+.app.dark .split-diff-cell.left.added,
+.app.dark .split-diff-cell.right.removed {
+  background: rgba(148, 163, 184, 0.05);
+}
+
+.app.light .split-diff-cell.left.added,
+.app.light .split-diff-cell.right.removed {
+  background: rgba(148, 163, 184, 0.06);
+}
+
+.split-diff-empty {
+  padding: 16px;
+  font-size: 12px;
+  text-align: center;
+  opacity: 0.75;
 }
 
 .diff-line {

@@ -5,7 +5,7 @@
  * Uses Tauri commands for git operations.
  */
 
-import { invoke } from '@tauri-apps/api/core';
+import { invoke } from '../../platform/native';
 
 export interface GitCommit {
     hash: string;

@@ -2,7 +2,7 @@
  * SupervisorValidator - Validation checks and conflict detection
  */
 
-import { invoke } from '@tauri-apps/api/core';
+import { invoke } from '../../platform/native';
 import {
   ValidationCheck,
   ValidationResult,

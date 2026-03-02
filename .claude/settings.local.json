@@ -27,7 +27,8 @@
       "WebFetch(domain:www.digitalapplied.com)",
       "Bash(git submodule:*)",
       "Bash(git rm:*)",
-      "Bash(git add:*)"
+      "Bash(git add:*)",
+      "Bash(node -e:*)"
     ]
   }
 }

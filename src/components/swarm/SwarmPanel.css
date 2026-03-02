@@ -1,4 +1,4 @@
-/* SwarmPanel Styles */
+/* SwarmPanel — Agent Manager Styles */
 
 .swarm-panel {
   display: flex;
@@ -6,42 +6,17 @@
   height: 100%;
   background: var(--bg-primary);
   overflow: hidden;
-  border-radius: 0;
 }
 
-.swarm-panel.light {
-  --bg-primary: var(--bg-primary);
-  --bg-secondary: var(--bg-secondary);
-  --bg-tertiary: var(--bg-sidebar);
-  --text-primary: var(--text-primary);
-  --text-secondary: var(--text-secondary);
-  --border-color: var(--border-default);
-  --accent-color: var(--accent-primary);
-  --danger-color: var(--accent-red);
-  --success-color: var(--accent-primary);
-  --warning-color: var(--accent-yellow);
-}
-
-.swarm-panel.dark {
-  --bg-primary: var(--bg-primary);
-  --bg-secondary: var(--bg-secondary);
-  --bg-tertiary: var(--bg-sidebar);
-  --text-primary: var(--text-primary);
-  --text-secondary: var(--text-secondary);
-  --border-color: var(--border-default);
-  --accent-color: var(--accent-primary);
-  --danger-color: var(--accent-red);
-  --success-color: var(--accent-primary);
-  --warning-color: var(--accent-yellow);
-}
-
+/* ── Header ─────────────────────────────────────── */
 .swarm-header {
   height: 44px;
   display: flex;
   align-items: center;
-  padding: 0 20px;
-  border-bottom: 1px solid var(--border-color);
+  padding: 0 16px;
+  border-bottom: 1px solid var(--border-default);
   background: var(--bg-secondary);
+  flex-shrink: 0;
 }
 
 .swarm-header h2 {
@@ -49,723 +24,190 @@
   font-size: 13px;
   font-weight: 600;
   color: var(--text-primary);
+  flex: 1;
 }
-
-.swarm-header-status {
-  margin-left: auto;
-  margin-right: 16px;
-}
-
-.status-badge {
-  display: inline-block;
-  padding: 4px 12px;
-  border-radius: 12px;
-  font-size: 11px;
-  font-weight: 600;
-  text-transform: uppercase;
-  letter-spacing: 0.5px;
-}
-
-.status-badge.idle { background: var(--bg-tertiary); color: var(--text-secondary); }
-.status-badge.analyzing,
-.status-badge.planning,
-.status-badge.spawning { background: var(--accent-color); color: white; }
-.status-badge.running { background: var(--success-color); color: white; }
-.status-badge.validating { background: var(--warning-color); color: white; }
-.status-badge.fixing { background: var(--warning-color); color: white; }
-.status-badge.paused { background: var(--accent-color); color: white; }
-.status-badge.completed { background: var(--success-color); color: white; }
-.status-badge.failed,
-.status-badge.aborting { background: var(--danger-color); color: white; }
 
 .close-btn {
   background: none;
   border: none;
-  font-size: 24px;
+  font-size: 20px;
   color: var(--text-secondary);
   cursor: pointer;
   padding: 0;
-  width: 32px;
-  height: 32px;
+  width: 28px;
+  height: 28px;
   display: flex;
   align-items: center;
   justify-content: center;
-  border-radius: 6px;
+  border-radius: 4px;
+  line-height: 1;
 }
 
 .close-btn:hover {
-  background: var(--bg-tertiary);
+  background: var(--bg-hover);
   color: var(--text-primary);
 }
 
-.swarm-header-actions {
-  margin-left: auto;
-  margin-right: 16px;
+/* ── Spawn Bar ───────────────────────────────────── */
+.spawn-bar {
   display: flex;
+  align-items: center;
   gap: 8px;
+  padding: 10px 12px;
+  border-bottom: 1px solid var(--border-default);
+  background: var(--bg-primary);
+  flex-shrink: 0;
 }
 
-.demo-toggle {
-  padding: 4px 8px;
-  background: var(--warning-color);
-  color: white;
-  border: none;
-  border-radius: 4px;
-  font-size: 11px;
-  cursor: pointer;
-  transition: all 0.2s ease;
-}
-
-.demo-toggle:hover {
-  background: var(--accent-color);
-}
-
-.demo-badge {
-  margin-left: 8px;
-  padding: 2px 6px;
-  background: var(--warning-color);
-  color: white;
-  border-radius: 8px;
-  font-size: 9px;
-  font-weight: 600;
-  text-transform: uppercase;
-  letter-spacing: 0.5px;
-}
-
-.progress-steps {
-  margin-top: 16px;
-}
-
-.step {
-  display: flex;
-  align-items: center;
-  padding: 8px 12px;
-  margin-bottom: 8px;
-  border-radius: 6px;
-  background: var(--bg-tertiary);
-  transition: all 0.3s ease;
-}
-
-.step-icon {
-  font-size: 16px;
-  margin-right: 8px;
-  font-weight: 600;
-}
-
-.step-text {
-  font-size: 12px;
-  font-weight: 500;
-}
-
-.step.active {
-  background: var(--accent-color);
-  color: white;
-}
-
-.step.completed {
-  background: var(--success-color);
-  color: white;
-}
-
-.step.error {
-  background: var(--danger-color);
-  color: white;
-}
-
-.step.pending {
-  background: var(--bg-secondary);
-  color: var(--text-secondary);
-  border: 1px solid var(--border-default);
-}
-
-.agents-grid {
-  display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(350px, 1fr));
-  gap: 16px;
-  margin-top: 16px;
-  width: 100%;
-}
-
-.agents-grid .agent-terminal {
-  min-height: 280px;
-  max-height: 320px;
-}
-
-.progress-display {
-  margin-top: 16px;
-  padding: 16px;
-  background: var(--bg-secondary);
-  border-radius: 8px;
-  border: 1px solid var(--border-default);
-}
-
-.progress-status {
-  display: flex;
-  align-items: center;
-  gap: 12px;
-}
-
-.status-indicator {
-  padding: 6px 12px;
-  background: var(--accent-color);
-  color: white;
-  border-radius: 12px;
-  font-size: 11px;
-  font-weight: 600;
-  text-transform: uppercase;
-  letter-spacing: 0.5px;
-  min-width: 80px;
-  text-align: center;
-}
-
-.status-text {
-  color: var(--text-primary);
-  font-weight: 500;
-}
-
-.swarm-content {
+.spawn-input {
   flex: 1;
-  overflow-y: auto;
-  padding: 20px;
-}
-
-.swarm-section {
-  margin-bottom: 24px;
-}
-
-.swarm-section h3 {
-  margin: 0 0 12px 0;
-  font-size: 14px;
-  font-weight: 600;
-  color: var(--text-primary);
-  text-transform: uppercase;
-  letter-spacing: 0.5px;
-}
-
-.swarm-warning,
-.swarm-error {
-  padding: 16px;
-  border-radius: 8px;
-  margin-bottom: 20px;
-}
-
-.swarm-warning {
-  background: var(--bg-hover);
-  border: 1px solid var(--warning-color);
-  color: var(--warning-color);
-}
-
-.swarm-error {
-  background: var(--bg-hover);
-  border: 1px solid var(--danger-color);
-  color: var(--danger-color);
-}
-
-.swarm-warning strong,
-.swarm-error strong {
-  display: block;
-  margin-bottom: 8px;
-}
-
-.swarm-error button {
-  margin-top: 12px;
-  padding: 6px 12px;
-  background: var(--danger-color);
-  color: white;
-  border: none;
-  border-radius: 4px;
-  cursor: pointer;
-}
-
-/* Goal Input */
-.swarm-section textarea {
-  width: 100%;
-  padding: 12px;
-  border: 1px solid var(--border-color);
-  border-radius: 8px;
   background: var(--bg-secondary);
-  color: var(--text-primary);
-  font-family: inherit;
-  font-size: 14px;
-  resize: vertical;
-  min-height: 80px;
-}
-
-.swarm-section textarea:focus {
-  outline: none;
-  border-color: var(--accent-color);
-}
-
-.swarm-section textarea:disabled {
-  opacity: 0.6;
-  cursor: not-allowed;
-}
-
-.goal-actions {
-  margin-top: 12px;
-}
-
-.analyze-btn {
-  padding: 8px 16px;
-  background: var(--bg-tertiary);
-  color: var(--text-primary);
-  border: 1px solid var(--border-color);
+  border: 1px solid var(--border-default);
   border-radius: 6px;
-  cursor: pointer;
-  font-size: 13px;
+  padding: 7px 10px;
+  color: var(--text-primary);
+  font-family: var(--font-mono);
+  font-size: 12px;
+  outline: none;
+  transition: border-color 0.15s;
 }
 
-.analyze-btn:hover:not(:disabled) {
-  background: var(--accent-color);
-  border-color: var(--accent-color);
-  color: white;
+.spawn-input::placeholder {
+  color: var(--text-muted, var(--text-secondary));
+  opacity: 0.7;
 }
 
-.analyze-btn:disabled {
+.spawn-input:focus {
+  border-color: var(--accent-primary);
+}
+
+.spawn-input:disabled {
   opacity: 0.5;
   cursor: not-allowed;
 }
 
-/* Complexity Section */
-.complexity-section {
-  background: var(--bg-secondary);
-  padding: 16px;
-  border-radius: 8px;
-}
-
-.complexity-grid {
-  display: grid;
-  grid-template-columns: repeat(3, 1fr);
-  gap: 16px;
-  margin-bottom: 12px;
-}
-
-.complexity-item {
-  text-align: center;
-}
-
-.complexity-item .label {
-  display: block;
-  font-size: 11px;
-  color: var(--text-secondary);
-  margin-bottom: 4px;
-  text-transform: uppercase;
-}
-
-.complexity-item .value {
-  font-size: 24px;
+.spawn-btn {
+  padding: 7px 14px;
+  background: var(--accent-primary);
+  color: white;
+  border: none;
+  border-radius: 6px;
+  font-size: 12px;
   font-weight: 600;
-  color: var(--text-primary);
-}
-
-.complexity-item .value.score-1 { color: var(--success-color); }
-.complexity-item .value.score-2 { color: var(--warning-color); }
-.complexity-item .value.score-3,
-.complexity-item .value.score-4 { color: var(--danger-color); }
-
-.reasoning {
-  font-size: 13px;
-  color: var(--text-secondary);
-  margin: 0;
-  font-style: italic;
-}
-
-/* Agents Grid */
-.agents-grid {
-  display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(250px, 1fr));
-  gap: 16px;
-}
-
-/* Agent Card */
-.agent-card {
-  background: var(--bg-secondary);
-  border-radius: 8px;
-  padding: 16px;
-  border-left: 4px solid var(--accent-color);
   cursor: pointer;
-  transition: transform 0.2s, box-shadow 0.2s;
+  white-space: nowrap;
+  transition: opacity 0.15s;
 }
 
-.agent-card:hover {
-  transform: translateY(-2px);
-  box-shadow: 0 4px 12px var(--border-glow);
+.spawn-btn:hover:not(:disabled) {
+  opacity: 0.85;
 }
 
-.agent-card.running { border-left-color: var(--success-color); }
-.agent-card.waiting { border-left-color: var(--warning-color); }
-.agent-card.completed { border-left-color: var(--success-color); }
-.agent-card.failed { border-left-color: var(--danger-color); }
+.spawn-btn:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
 
-.agent-header {
+/* ── Error Bar ───────────────────────────────────── */
+.swarm-error-bar {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  margin-bottom: 12px;
-}
-
-.agent-role {
-  padding: 4px 8px;
-  border-radius: 4px;
-  font-size: 11px;
-  font-weight: 600;
-  color: white;
-  text-transform: uppercase;
-}
-
-.agent-status {
-  font-size: 12px;
-  color: var(--text-secondary);
-}
-
-.agent-task {
-  font-size: 13px;
-  color: var(--text-primary);
-  margin-bottom: 12px;
-  line-height: 1.4;
-}
-
-.agent-metrics {
-  display: grid;
-  grid-template-columns: repeat(4, 1fr);
-  gap: 8px;
-  margin-bottom: 12px;
-}
-
-.agent-metrics .metric {
-  text-align: center;
-}
-
-.agent-metrics .label {
-  display: block;
-  font-size: 10px;
-  color: var(--text-secondary);
-  text-transform: uppercase;
-}
-
-.agent-metrics .value {
-  font-size: 14px;
-  font-weight: 600;
-  color: var(--text-primary);
-}
-
-.agent-output {
-  background: var(--bg-tertiary);
-  border-radius: 4px;
-  padding: 8px;
-  margin-bottom: 12px;
-}
-
-.agent-output pre {
-  margin: 0;
-  font-size: 11px;
-  color: var(--text-secondary);
-  white-space: pre-wrap;
-  word-break: break-all;
-  max-height: 60px;
-  overflow: hidden;
-}
-
-.agent-actions {
-  display: flex;
-  gap: 8px;
-}
-
-.terminate-btn {
   padding: 6px 12px;
-  background: var(--danger-color);
-  color: white;
-  border: none;
-  border-radius: 4px;
+  background: rgba(239, 68, 68, 0.12);
+  border-bottom: 1px solid rgba(239, 68, 68, 0.3);
+  color: var(--accent-red, #EF4444);
   font-size: 12px;
+  flex-shrink: 0;
+}
+
+.swarm-error-bar button {
+  background: none;
+  border: none;
+  color: inherit;
   cursor: pointer;
+  font-size: 16px;
+  padding: 0 2px;
+  opacity: 0.7;
 }
 
-.terminate-btn:hover {
-  opacity: 0.9;
+.swarm-error-bar button:hover {
+  opacity: 1;
 }
 
-/* Approval Queue */
-.approval-queue {
-  display: flex;
-  flex-direction: column;
-  gap: 12px;
-}
-
-.approval-queue.empty {
-  text-align: center;
-  padding: 20px;
-  color: var(--text-secondary);
-}
-
-.approval-item {
-  background: var(--bg-secondary);
-  border-radius: 8px;
-  padding: 16px;
-  border: 1px solid var(--warning-color);
-}
-
-.approval-header {
+/* ── Status Bar ──────────────────────────────────── */
+.agents-status-bar {
   display: flex;
   align-items: center;
-  gap: 8px;
-  margin-bottom: 12px;
+  justify-content: space-between;
+  padding: 5px 12px;
+  border-bottom: 1px solid var(--border-default);
+  background: var(--bg-secondary);
+  flex-shrink: 0;
 }
 
-.approval-icon {
-  font-size: 18px;
-}
-
-.approval-pattern {
-  font-weight: 600;
-  color: var(--text-primary);
-  text-transform: capitalize;
-}
-
-.approval-time {
-  margin-left: auto;
-  font-size: 12px;
-  color: var(--text-secondary);
-}
-
-.approval-content {
-  margin-bottom: 12px;
-}
-
-.matched-text {
-  font-size: 13px;
-  color: var(--text-primary);
-  margin-bottom: 8px;
-}
-
-.context-preview {
-  background: var(--bg-tertiary);
-  border-radius: 4px;
-  padding: 8px;
-}
-
-.context-preview pre {
-  margin: 0;
+.agent-count {
   font-size: 11px;
   color: var(--text-secondary);
-  white-space: pre-wrap;
-  max-height: 80px;
-  overflow: hidden;
+  font-family: var(--font-mono);
 }
 
-.approval-confidence {
+.kill-all-btn {
+  padding: 3px 8px;
+  background: none;
+  border: 1px solid var(--accent-red, #EF4444);
+  color: var(--accent-red, #EF4444);
+  border-radius: 4px;
+  font-size: 11px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: all 0.15s;
+}
+
+.kill-all-btn:hover {
+  background: var(--accent-red, #EF4444);
+  color: white;
+}
+
+/* ── Agents List ─────────────────────────────────── */
+.agents-list {
+  flex: 1;
+  overflow-y: auto;
+  padding: 10px;
   display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+/* ── Empty State ─────────────────────────────────── */
+.agents-empty {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
   align-items: center;
-  gap: 8px;
+  justify-content: center;
+  padding: 40px 20px;
+  text-align: center;
+  color: var(--text-secondary);
+  gap: 4px;
+}
+
+.agents-empty-icon {
+  font-size: 32px;
   margin-bottom: 12px;
+  opacity: 0.3;
+}
+
+.agents-empty p {
+  margin: 0;
   font-size: 13px;
-}
-
-.approval-confidence .value.high { color: var(--success-color); }
-.approval-confidence .value.low { color: var(--warning-color); }
-
-.approval-actions {
-  display: flex;
-  gap: 12px;
-}
-
-.approve-btn,
-.deny-btn {
-  flex: 1;
-  padding: 8px 16px;
-  border: none;
-  border-radius: 6px;
   font-weight: 500;
-  cursor: pointer;
-}
-
-.approve-btn {
-  background: var(--success-color);
-  color: white;
-}
-
-.deny-btn {
-  background: var(--danger-color);
-  color: white;
-}
-
-/* Safety Controls */
-.safety-controls {
-  display: flex;
-  flex-direction: column;
-  gap: 16px;
-}
-
-.safety-toggles {
-  display: flex;
-  flex-direction: column;
-  gap: 12px;
-}
-
-.toggle-item {
-  display: flex;
-  align-items: flex-start;
-  gap: 12px;
-  cursor: pointer;
-}
-
-.toggle-item input {
-  margin-top: 4px;
-}
-
-.toggle-label {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  font-weight: 500;
-  color: var(--text-primary);
-}
-
-.toggle-icon {
-  font-size: 16px;
-}
-
-.toggle-description {
-  display: block;
-  font-size: 12px;
-  color: var(--text-secondary);
-  margin-top: 2px;
-}
-
-.kill-switch-container {
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  gap: 8px;
-}
-
-.kill-switch {
-  width: 100%;
-  padding: 12px 24px;
-  background: var(--bg-tertiary);
-  color: var(--text-primary);
-  border: 2px solid var(--danger-color);
-  border-radius: 8px;
-  font-weight: 600;
-  font-size: 14px;
-  cursor: pointer;
-  transition: all 0.2s;
-}
-
-.kill-switch:hover:not(:disabled) {
-  background: var(--danger-color);
-  color: white;
-}
-
-.kill-switch.confirm {
-  background: var(--danger-color);
-  color: white;
-  animation: pulse 1s infinite;
-}
-
-.kill-switch:disabled {
-  opacity: 0.5;
-  cursor: not-allowed;
-}
-
-.kill-warning {
-  font-size: 12px;
-  color: var(--danger-color);
-}
-
-@keyframes pulse {
-  0%, 100% { transform: scale(1); }
-  50% { transform: scale(1.02); }
-}
-
-.safety-info {
-  display: flex;
-  gap: 16px;
-  flex-wrap: wrap;
-}
-
-.info-item {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  font-size: 12px;
   color: var(--text-secondary);
 }
 
-.info-icon {
-  font-size: 14px;
-}
-
-/* Task Section */
-.task-section {
-  background: var(--bg-secondary);
-  padding: 16px;
-  border-radius: 8px;
-}
-
-.task-info p {
-  margin: 4px 0;
-  font-size: 13px;
-  color: var(--text-secondary);
-}
-
-.task-info strong {
-  color: var(--text-primary);
-}
-
-/* Control Buttons */
-.swarm-controls {
-  display: flex;
-  gap: 12px;
-  padding: 16px 20px;
-  border-top: 1px solid var(--border-color);
-  background: var(--bg-secondary);
-}
-
-.swarm-controls button {
-  flex: 1;
-  padding: 12px 24px;
-  border: none;
-  border-radius: 8px;
-  font-weight: 600;
-  font-size: 14px;
-  cursor: pointer;
-  transition: opacity 0.2s;
-}
-
-.swarm-controls button:disabled {
-  opacity: 0.5;
-  cursor: not-allowed;
-}
-
-.swarm-controls button.primary {
-  background: var(--accent-color);
-  color: white;
-}
-
-.swarm-controls button.danger {
-  background: var(--danger-color);
-  color: white;
-}
-
-.swarm-controls .pause-btn {
-  background: var(--warning-color);
-  color: white;
-}
-
-.swarm-controls .resume-btn {
-  background: var(--success-color);
-  color: white;
-}
-
-/* Overlay */
-.swarm-overlay {
-  position: fixed;
-  top: 0;
-  left: 0;
-  right: 0;
-  bottom: 0;
-  background: var(--bg-primary);
-  opacity: 0.8;
-  z-index: 999;
+.agents-empty-sub {
+  font-size: 12px !important;
+  font-weight: 400 !important;
+  opacity: 0.7;
+  margin-top: 4px !important;
 }

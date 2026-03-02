@@ -1,7 +1,14 @@
 import { useState, useCallback, useEffect, useRef } from "react";
-import { open } from "@tauri-apps/plugin-dialog";
-import { readDir, readTextFile, DirEntry } from "@tauri-apps/plugin-fs";
-import { invoke } from "@tauri-apps/api/core";
+import {
+  open,
+  readDir,
+  readTextFile,
+  type DirEntry,
+  invoke,
+  isPermissionGranted,
+  requestPermission,
+  sendNotification,
+} from "./platform/native";
 import "./App.css";
 import { Settings, AIConfig, AI_PROVIDERS, AIProvider } from "./components/Settings";
 import { CodeEditor } from "./components/CodeEditor";
@@ -14,7 +21,6 @@ import { VoiceChat } from "./components/VoiceChat";
 import { AutomationPanel } from "./components/AutomationPanel";
 import { SwarmPanel } from "./components/swarm/SwarmPanel";
 import { aiService } from "./services/ai";
-import { opencodeClient } from "./services/ai/opencode-client";
 import { workspaceService, WorkspaceContext } from "./services/workspace";
 import { TerminalRef } from "./components/TerminalBlock";
 
@@ -110,6 +116,9 @@ function App() {
   }, []);
 
   const terminalRefs = useRef<Map<string, TerminalRef>>(new Map());
+  // Commands queued for new automation terminals — consumed when the TerminalBlock mounts
+  const pendingAutomationCommands = useRef<Map<string, string>>(new Map());
+
 
 
   // Terminal tabs
@@ -136,6 +145,8 @@ function App() {
     mediaQuery.addEventListener("change", handleChange);
     return () => mediaQuery.removeEventListener("change", handleChange);
   }, []);
+
+
 
   // Add new terminal tab
   const addTerminalTab = useCallback(() => {
@@ -167,25 +178,9 @@ function App() {
       setShellCwd(cwd);
     }).catch(() => { });
 
-    // Load saved API keys and initialize aiService (backed by opencode engine)
+    // Load saved API keys and initialize aiService
     const initializeAI = async () => {
-      // Step 1: Start the opencode server (velixcode engine)
-      try {
-        await invoke<string>("start_opencode_server");
-        console.log("opencode server start requested");
-      } catch (e) {
-        console.warn("Could not start opencode server:", e);
-      }
-
-      // Step 2: Wait for the opencode server to be ready (up to 15s)
-      const serverReady = await opencodeClient.waitUntilReady(15000, 500);
-      if (!serverReady) {
-        console.warn("opencode server did not become ready in time; AI features may be unavailable");
-      } else {
-        console.log("opencode server is ready");
-      }
-
-      // Step 3: Try to load OpenAI key for voice features
+      // Try to load OpenAI key for voice features
       try {
         const openaiKey = await invoke<string>("get_api_key", { provider: "chatgpt" });
         if (openaiKey) {
@@ -195,8 +190,8 @@ function App() {
         // No OpenAI key saved
       }
 
-      // Step 4: Find all configured providers and register them with opencode
-      const providerOrder = ['claude', 'chatgpt', 'gemini', 'glm4', 'minimax', 'zen', 'kimi', 'deepseek', 'groq']; // Prioritize Claude first
+      // Find all configured providers
+      const providerOrder = ['claude', 'chatgpt', 'gemini', 'glm4', 'minimax', 'kimi', 'deepseek', 'groq', 'mistral'];
       const orderedProviders = providerOrder.map(id => AI_PROVIDERS.find(p => p.id === id)).filter((p): p is AIProvider => p !== undefined);
 
       console.log('Available providers:', orderedProviders.map(p => p.id));
@@ -209,7 +204,6 @@ function App() {
           const key = await invoke<string>("get_api_key", { provider: provider.id });
           console.log(`Checking provider ${provider.id}:`, key ? 'Key found' : 'No key');
           if (key) {
-            // Register with opencode engine (this is the new AI backend)
             await aiService.setApiKey(provider.id, key);
             configured.push({ id: provider.id, name: provider.name });
 
@@ -222,7 +216,7 @@ function App() {
                 model: provider.models[0],
                 apiKey: key,
               });
-              console.log('AI service initialized successfully (opencode engine)');
+              console.log('AI service initialized successfully');
             }
           }
         } catch (error) {
@@ -232,6 +226,44 @@ function App() {
       }
 
       setConfiguredProviders(configured);
+
+      // --- NEW: Automatically test configured models ---
+      for (const provider of configured) {
+        try {
+          console.log(`Auto-testing provider ${provider.id}...`);
+          const testStart = performance.now();
+
+          // Request a quick, minimal generation to ensure it works
+          const result = await aiService.chat(
+            [{ role: "user", content: "Say 'ok'." }],
+            {
+              model: AI_PROVIDERS.find(p => p.id === provider.id)?.models[0],
+              maxTokens: 5
+            }
+          );
+
+          const testMs = Math.round(performance.now() - testStart);
+          console.log(`Provider ${provider.id} tested successfully in ${testMs}ms. Response:`, result.content);
+        } catch (error) {
+          console.error(`Provider ${provider.id} failed the auto-test!`, error);
+
+          // Native desktop notification if permission granted
+          try {
+            let permissionGranted = await isPermissionGranted();
+            if (!permissionGranted) {
+              permissionGranted = (await requestPermission()) === 'granted';
+            }
+            if (permissionGranted) {
+              await sendNotification({
+                title: 'AI Provider Issue',
+                body: `The ${provider.name} AI doesn't seem to be working. Check your API key.`
+              });
+            }
+          } catch (notifErr) {
+            console.warn('Could not send native notification:', notifErr);
+          }
+        }
+      }
     };
     initializeAI();
 
@@ -297,11 +329,6 @@ function App() {
         terminal.write('\x1b[31mAI not configured. Please add an API key in Settings.\x1b[0m\r\n');
       });
       return;
-    }
-
-    // Keep opencode client in sync with the current project directory
-    if (currentDir) {
-      opencodeClient.setDirectory(currentDir);
     }
 
     setIsAIProcessing(true);
@@ -608,22 +635,12 @@ Working directory: ${currentDir || 'unknown'}`;
     }
   }, []);
 
-  // Keep opencodeClient in sync with the active project/shell directory
+  // Auto-load project files when currentDir is explicitly set
   useEffect(() => {
-    const dir = currentDir || (shellCwd !== '~' ? shellCwd : '');
-    if (dir) opencodeClient.setDirectory(dir);
-  }, [currentDir, shellCwd]);
-
-  // Auto-load project files when currentDir changes or on startup from shell cwd
-  useEffect(() => {
-    const dir = currentDir || shellCwd;
-    if (dir && dir !== '~' && dir !== '') {
-      loadProjectFiles(dir);
-      if (!currentDir && shellCwd && shellCwd !== '~') {
-        setCurrentDir(shellCwd);
-      }
+    if (currentDir && currentDir !== '~' && currentDir !== '') {
+      loadProjectFiles(currentDir);
     }
-  }, [currentDir, shellCwd, loadProjectFiles]);
+  }, [currentDir, loadProjectFiles]);
 
   const handleOpenProject = async () => {
     try {
@@ -747,6 +764,25 @@ Working directory: ${currentDir || 'unknown'}`;
       activeRef.focus();
     }
   }, [activeTerminalId]);
+
+  // Open one terminal tab per prompt and run `claude "<prompt>"` in each
+  const handleStartAutomation = useCallback((prompts: string[]) => {
+    if (prompts.length === 0) return;
+
+    const newTabs: TerminalTab[] = prompts.map((_, i) => ({
+      id: `automation-${Date.now()}-${i}`,
+      title: `Agent ${i + 1}`,
+    }));
+
+    // Store the claude command for each tab — consumed when the TerminalBlock mounts
+    prompts.forEach((prompt, i) => {
+      const escaped = prompt.replace(/\\/g, '\\\\').replace(/"/g, '\\"');
+      pendingAutomationCommands.current.set(newTabs[i].id, `claude "${escaped}"\r`);
+    });
+
+    setTerminalTabs(prev => [...prev, ...newTabs]);
+    setActiveTerminalId(newTabs[0].id);
+  }, []);
 
   const handleGitFileClick = async (file: string) => {
     const fullPath = currentDir ? `${currentDir}/${file}` : file;
@@ -1026,6 +1062,44 @@ Working directory: ${currentDir || 'unknown'}`;
       <main className="main-split">
         {/* Terminal pane */}
         <div className="terminal-pane">
+
+          {/* Editor section — visible when one or more files are open */}
+          {openTabs.length > 0 && (
+            <div className="editor-section">
+              {/* File tab bar */}
+              <div className="editor-tabs">
+                {openTabs.map(tab => (
+                  <div
+                    key={tab.id}
+                    className={`editor-tab ${tab.id === activeTabId ? 'active' : ''}`}
+                    onClick={() => setActiveTabId(tab.id)}
+                  >
+                    <span className="editor-tab-name">
+                      {tab.name}{tab.isDirty ? ' ●' : ''}
+                    </span>
+                    <button
+                      className="editor-tab-close"
+                      onClick={(e) => handleCloseTab(tab.id, e)}
+                    >
+                      ×
+                    </button>
+                  </div>
+                ))}
+              </div>
+
+              {/* Active file editor */}
+              {activeTab && (
+                <CodeEditor
+                  filePath={activeTab.path}
+                  content={activeTab.content}
+                  onContentChange={(content) => handleTabContentChange(activeTabId!, content)}
+                  onSave={() => handleTabSaved(activeTabId!)}
+                  tabSize={tabSize}
+                />
+              )}
+            </div>
+          )}
+
           <div className="terminal-topbar">
             {/* Terminal tabs */}
             <div className="terminal-tabs">
@@ -1051,35 +1125,7 @@ Working directory: ${currentDir || 'unknown'}`;
               </button>
             </div>
 
-            <div className="terminal-topbar-actions">
-              {configuredProviders.length > 1 && aiConfig?.provider && (
-                <div className="provider-selector">
-                  <select
-                    value={aiConfig.provider}
-                    onChange={(e) => handleProviderChange(e.target.value)}
-                    className="provider-select"
-                  >
-                    {configuredProviders.map(p => (
-                      <option key={p.id} value={p.id}>{p.name.split(' ')[0]}</option>
-                    ))}
-                  </select>
-                </div>
-              )}
-              {aiConfig?.provider && (
-                <div className="model-selector">
-                  <span className="provider-label">{aiConfig.provider}</span>
-                  <select
-                    value={aiConfig.model}
-                    onChange={(e) => handleModelChange(e.target.value)}
-                    className="model-select"
-                  >
-                    {AI_PROVIDERS.find(p => p.id === aiConfig.provider)?.models.map(m => (
-                      <option key={m} value={m}>{m}</option>
-                    ))}
-                  </select>
-                </div>
-              )}
-            </div>
+
           </div>
 
           <div className={`terminal-body ${terminalTabs.length > 1 ? 'split-view' : ''}`}>
@@ -1106,8 +1152,18 @@ Working directory: ${currentDir || 'unknown'}`;
                 )}
                 <TerminalBlock
                   ref={(el) => {
-                    if (el) terminalRefs.current.set(tab.id, el);
-                    else terminalRefs.current.delete(tab.id);
+                    if (el) {
+                      terminalRefs.current.set(tab.id, el);
+                      // If this terminal was created for automation, run the queued command
+                      const pendingCmd = pendingAutomationCommands.current.get(tab.id);
+                      if (pendingCmd) {
+                        pendingAutomationCommands.current.delete(tab.id);
+                        // Small delay so the PTY session has time to start
+                        setTimeout(() => el.write(pendingCmd), 800);
+                      }
+                    } else {
+                      terminalRefs.current.delete(tab.id);
+                    }
                   }}
                   cwd={shellCwd}
                   onCwdChange={setShellCwd}
@@ -1127,6 +1183,14 @@ Working directory: ${currentDir || 'unknown'}`;
                       handleTabContentChange(tab.id, content);
                     }
                   }}
+                  onOpenGitPanel={() => {
+                    setShowGitPanel(true);
+                    setShowVoiceChat(false);
+                    setShowSearchPanel(false);
+                    setShowToolPanel(false);
+                    setShowAutomation(false);
+                    setShowSwarm(false);
+                  }}
                   projectDir={currentDir}
                   projectFileList={allFiles}
                   projectFileContents={projectFileContents}
@@ -1139,78 +1203,79 @@ Working directory: ${currentDir || 'unknown'}`;
 
         {/* Right panel: tools, search, git, automation, or swarm */}
         <div className={`right-panel${hasRightPanel ? ' open' : ''}`}>
-            {showToolPanel && (
-              <ToolPanel
-                filePath={null}
-                fileContent=""
-                projectDir={currentDir}
-                onClose={() => setShowToolPanel(false)}
-              />
-            )}
-            {showSearchPanel && (
-              <SearchPanel
-                currentDir={currentDir}
-                onResultClick={async (path: string) => {
-                  try {
-                    const fullPath = currentDir ? `${currentDir}/${path}` : path;
-                    const content = await readTextFile(fullPath);
-                    const newTab = {
-                      id: Date.now().toString(),
-                      path: fullPath,
-                      name: path.split('/').pop() || path,
-                      content,
-                      isDirty: false,
-                    };
-                    setOpenTabs(prev => [...prev, newTab]);
-                    setActiveTabId(newTab.id);
-                    setShowSearchPanel(false);
-                  } catch {
-                    alert("Cannot read this file");
-                  }
-                }}
-              />
-            )}
-            {showGitPanel && (
-              <GitPanel
-                currentDir={currentDir}
-                onFileClick={async (path: string) => {
-                  try {
-                    const fullPath = currentDir ? `${currentDir}/${path}` : path;
-                    const content = await readTextFile(fullPath);
-                    const newTab = {
-                      id: Date.now().toString(),
-                      path: fullPath,
-                      name: path.split('/').pop() || path,
-                      content,
-                      isDirty: false,
-                    };
-                    setOpenTabs(prev => [...prev, newTab]);
-                    setActiveTabId(newTab.id);
-                  } catch {
-                    alert("Cannot read this file");
-                  }
-                }}
-              />
-            )}
-            {showAutomation && (
-              <AutomationPanel
-                isOpen={showAutomation}
-                onClose={() => setShowAutomation(false)}
-                theme={theme}
-                hasApiKey={!!aiConfig?.apiKey}
-                onGeneratePrompts={(goal, count) => aiService.generateAutomationPrompts(goal, count)}
-                onWriteToTerminal={(data) => terminalRefs.current.forEach(t => t.write(data))}
-              />
-            )}
-            {showSwarm && (
-              <SwarmPanel
-                isOpen={showSwarm}
-                onClose={() => setShowSwarm(false)}
-                theme={theme}
-                workspacePath={currentDir}
-                hasApiKey={!!aiConfig?.apiKey}
-              />
-            )}
+          {showToolPanel && (
+            <ToolPanel
+              filePath={null}
+              fileContent=""
+              projectDir={currentDir}
+              onClose={() => setShowToolPanel(false)}
+            />
+          )}
+          {showSearchPanel && (
+            <SearchPanel
+              currentDir={currentDir}
+              onResultClick={async (path: string) => {
+                try {
+                  const fullPath = currentDir ? `${currentDir}/${path}` : path;
+                  const content = await readTextFile(fullPath);
+                  const newTab = {
+                    id: Date.now().toString(),
+                    path: fullPath,
+                    name: path.split('/').pop() || path,
+                    content,
+                    isDirty: false,
+                  };
+                  setOpenTabs(prev => [...prev, newTab]);
+                  setActiveTabId(newTab.id);
+                  setShowSearchPanel(false);
+                } catch {
+                  alert("Cannot read this file");
+                }
+              }}
+            />
+          )}
+          {showGitPanel && (
+            <GitPanel
+              currentDir={currentDir}
+              onFileClick={async (path: string) => {
+                try {
+                  const fullPath = currentDir ? `${currentDir}/${path}` : path;
+                  const content = await readTextFile(fullPath);
+                  const newTab = {
+                    id: Date.now().toString(),
+                    path: fullPath,
+                    name: path.split('/').pop() || path,
+                    content,
+                    isDirty: false,
+                  };
+                  setOpenTabs(prev => [...prev, newTab]);
+                  setActiveTabId(newTab.id);
+                } catch {
+                  alert("Cannot read this file");
+                }
+              }}
+            />
+          )}
+          {showAutomation && (
+            <AutomationPanel
+              isOpen={showAutomation}
+              onClose={() => setShowAutomation(false)}
+              theme={theme}
+              hasApiKey={!!aiConfig?.apiKey}
+              configuredProviders={configuredProviders}
+              onGeneratePrompts={(goal, count) => aiService.generateAutomationPrompts(goal, count)}
+              onStartAutomation={handleStartAutomation}
+            />
+          )}
+          {showSwarm && (
+            <SwarmPanel
+              isOpen={showSwarm}
+              onClose={() => setShowSwarm(false)}
+              theme={theme}
+              workspacePath={currentDir}
+              hasApiKey={!!aiConfig?.apiKey}
+            />
+          )}
         </div>
       </main>
 
