@@ -1,117 +1,145 @@
 # Velix
 
-**Velix** is an AI-powered desktop IDE and development environment built with React and TypeScript, with both **Tauri** and **Electron** desktop runtimes. It combines a fully-featured code editor, integrated terminal, and advanced AI capabilities into a single, native application designed to supercharge your development workflow.
+> An AI-powered desktop IDE that brings multi-provider AI, a full terminal, and a code editor into one native application.
+
+Built with React + TypeScript on the frontend, with both **Tauri** (Rust) and **Electron** (Node.js) desktop runtimes. Designed around a minimal, distraction-free workflow — warm neutrals, deep teal accents, and everything you need in a single window.
+
+---
 
 ## Features
 
-### Core IDE Features
-- **Native Desktop Application** — Run with either Tauri (Rust backend) or Electron (Node backend) across macOS, Windows, and Linux
-- **Integrated Terminal** — Full PTY terminal emulator with support for multiple tabs, split views, and persistent shell sessions
-- **File Explorer** — Browse, open, and manage project files with a tree-view sidebar
-- **Code Editor** — Syntax-highlighted editor with configurable tab sizes and theme support
-- **Quick File Finder** — Instantly jump to any file in your project with `Cmd/Ctrl+P`
-- **Global Search** — Search across all files in your workspace
-- **Theme Support** — Light and dark modes with system preference detection
+**Core IDE**
+- Native desktop app — macOS, Windows, Linux via Tauri or Electron
+- Full PTY terminal with tabs, split views, and persistent sessions
+- File explorer with tree-view sidebar
+- Syntax-highlighted code editor with configurable tab sizes and theme support
+- Quick file finder — `Cmd/Ctrl+P` to jump anywhere instantly
+- Global search across your entire workspace
+- Light and dark themes with automatic system preference detection
 
-### AI-Powered Development
-- **Multi-Provider AI Support** — Seamlessly switch between Claude, ChatGPT (OpenAI), Gemini (Google), and GLM4
-- **Full Workspace Context** — AI understands your entire project structure and codebase for intelligent, context-aware responses
-- **Inline Code Assistance** — Ask AI questions directly from the terminal; it can read, create, and modify files across your project
-- **Voice Chat** — Hands-free voice interaction with AI (requires OpenAI API key)
-- **OpenCode Integration** — Powered by the [OpenCode](https://opencode.ai) engine, an open-source AI coding agent
+**AI-Powered Development**
+- Multi-provider support — Claude, OpenAI, Gemini, GLM4
+- Full workspace context — AI reads your project structure and files
+- Inline assistance from the terminal — ask, create, edit, refactor
+- Voice chat for hands-free interaction (requires OpenAI API key)
+- Powered by [OpenCode](https://opencode.ai), an open-source AI coding agent
 
-### Advanced AI Orchestration
-- **Automation Panel** — Run multiple AI agents automatically to accomplish complex, multi-step tasks
-- **Claude Swarm** — Advanced multi-agent orchestration system with:
+**Multi-Agent Orchestration**
+- Automation panel — run multiple AI agents on complex, multi-step tasks
+- Claude Swarm — spawn and coordinate multiple agents automatically
   - Task complexity analysis
-  - Automatic agent spawning and coordination
-  - Approval queues for human-in-the-loop control
-  - Safety controls (safe mode, dry run)
-  - Per-agent terminals for monitoring
+  - Human-in-the-loop approval queues
+  - Safe mode and dry-run controls
+  - Per-agent terminal views for full visibility
 
-### Git Integration
-- **Git Panel** — View changed files, stage changes, and manage your repository
-- **Status Indicators** — See modified, added, and deleted files at a glance
-- **Terminal Git Context** — AI understands your current git state for smarter suggestions
+**Git Integration**
+- Git panel — view diffs, stage changes, manage your repo
+- File status indicators (modified, added, deleted)
+- AI-aware git context for smarter suggestions
+
+---
 
 ## Getting Started
 
 ### Prerequisites
-- [Node.js](https://nodejs.org/) (v18+)
-- [Rust](https://www.rust-lang.org/tools/install) (for Tauri runtime)
-- An API key from one of the supported AI providers (Claude, OpenAI, Gemini, or GLM4)
 
-### Installation
+- [Node.js](https://nodejs.org/) v18+
+- [Rust](https://www.rust-lang.org/tools/install) (required for Tauri runtime only)
+- An API key from at least one supported AI provider
+
+### Install
 
 ```bash
-# Clone the repository
 git clone https://github.com/your-username/velix.git
 cd velix
-
-# Install dependencies
 npm install
+```
 
-# Run in development mode (Tauri)
+### Run
+
+```bash
+# Tauri (Rust backend) — recommended for production use
 npm run tauri dev
 
-# Run in development mode (Electron)
+# Electron (Node.js backend)
 npm run dev:electron
+```
 
-# Build frontend for production
+### Build
+
+```bash
+# Frontend only
 npm run build
 
-# Run desktop shell with built frontend (Electron)
+# Electron desktop bundle
 npm run electron
 
-# Build desktop app bundle (Tauri)
+# Tauri desktop bundle
 npm run tauri build
 ```
 
-### Configuration
+### Configure
 
-1. Launch Velix and click **Settings** in the sidebar
-2. Add your API key(s) for the AI provider(s) you want to use
-3. Select your preferred AI model
-4. Open a project folder to begin coding with AI assistance
+1. Open Velix and go to **Settings** in the sidebar
+2. Add your API key(s) for the AI provider(s) you want
+3. Select a model
+4. Open a project folder — the AI will index it automatically
+
+---
 
 ## Keyboard Shortcuts
 
 | Shortcut | Action |
-|----------|--------|
+|---|---|
 | `Cmd/Ctrl + P` | Quick file finder |
 | `Cmd/Ctrl + D` | New terminal tab |
 | `Cmd/Ctrl + W` | Close current terminal tab |
+
+---
 
 ## Architecture
 
 ```
 velix/
-├── src/                 # React frontend
-│   ├── components/      # UI components
-│   ├── services/        # AI, workspace, audio services
-│   └── App.tsx          # Main application
-├── electron/            # Electron main/preload runtime bridge
-├── src-tauri/           # Rust backend (Tauri)
-└── velixcode/           # OpenCode AI engine integration
+├── src/                  # React 19 + TypeScript frontend
+│   ├── components/       # UI components (editor, terminal, panels, AI chat)
+│   ├── services/         # AI, workspace, audio, and git services
+│   ├── styles/           # Component and global styles
+│   └── App.tsx           # Root application
+├── electron/             # Electron main process and preload bridge
+├── src-tauri/            # Rust backend (Tauri 2)
+│   └── src/              # Tauri commands and native integrations
+├── public/               # Static assets
+└── scripts/              # Build and dev helper scripts
 ```
 
-## Technology Stack
+---
 
-- **Frontend**: React 19, TypeScript, Vite
-- **Desktop Runtime**: Tauri 2 (Rust) and Electron (Node.js)
-- **Terminal**: xterm.js
-- **AI Engine**: OpenCode
-- **Styling**: CSS with theme variables
+## Tech Stack
 
-## Recommended IDE Setup
+| Layer | Technology |
+|---|---|
+| Frontend | React 19, TypeScript, Vite |
+| Desktop | Tauri 2 (Rust), Electron (Node.js) |
+| Terminal | xterm.js + node-pty |
+| AI Engine | OpenCode |
+| Styling | CSS custom properties, JetBrains Mono, Inter |
 
-- [VS Code](https://code.visualstudio.com/) + [Tauri](https://marketplace.visualstudio.com/items?itemName=tauri-apps.tauri-vscode) + [rust-analyzer](https://marketplace.visualstudio.com/items?itemName=rust-lang.rust-analyzer)
+---
+
+## Development Setup
+
+Recommended: [VS Code](https://code.visualstudio.com/) with these extensions:
+- [Tauri](https://marketplace.visualstudio.com/items?itemName=tauri-apps.tauri-vscode)
+- [rust-analyzer](https://marketplace.visualstudio.com/items?itemName=rust-lang.rust-analyzer)
+
+---
 
 ## Credits
 
-Velix is powered by [**OpenCode**](https://opencode.ai), an open-source AI coding agent developed by [Anomaly](https://github.com/anomalyco/opencode). OpenCode provides the core AI engine that enables Velix's intelligent code assistance, multi-provider support, and agent orchestration capabilities.
+Velix is built on [**OpenCode**](https://opencode.ai) by [Anomaly](https://github.com/anomalyco/opencode) — an open-source AI coding agent that powers the context engine, multi-provider routing, and agent orchestration.
 
-We are grateful to the OpenCode team for building such a powerful and flexible AI coding foundation.
+---
 
 ## License
 
