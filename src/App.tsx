@@ -36,7 +36,7 @@ const makeId = (prefix: string) =>
   `${prefix}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
 
 const buildPaneTitle = (index: number) => `Pane ${index}`;
-const MAX_PANES_PER_TAB = 8;
+const MAX_PANES_PER_TAB = 9;
 const PANE_DRAG_DATA_KEY = "application/x-velix-pane";
 const getPaneGridColumnCount = (paneCount: number) => (paneCount <= 1 ? 1 : paneCount <= 4 ? 2 : 3);
 

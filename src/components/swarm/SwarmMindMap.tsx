@@ -95,7 +95,7 @@ const truncateText = (value: string, max: number): string =>
 
 export const buildDefaultMindMapPosition = (index: number, total: number): MindMapPosition => {
   const safeTotal = Math.max(total, 1);
-  const cols = Math.min(3, safeTotal);
+  const cols = safeTotal <= 3 ? safeTotal : safeTotal <= 8 ? 4 : 5;
   const rows = Math.ceil(safeTotal / cols);
   const row = Math.floor(index / cols);
   const isLastRow = row === rows - 1;
@@ -103,12 +103,12 @@ export const buildDefaultMindMapPosition = (index: number, total: number): MindM
   const col = index - row * cols;
   const xStep = 0.74 / Math.max(nodesInRow - 1, 1);
   const x = nodesInRow === 1 ? 0.5 : 0.13 + col * xStep;
-  const yStep = rows === 1 ? 0 : 0.42 / Math.max(rows - 1, 1);
-  const y = 0.36 + row * yStep;
+  const yStep = rows === 1 ? 0 : 0.54 / Math.max(rows - 1, 1);
+  const y = 0.28 + row * yStep;
 
   return {
-    x: clamp(x, 0.08, 0.92),
-    y: clamp(y, 0.24, 0.9),
+    x: clamp(x, 0.05, 0.95),
+    y: clamp(y, 0.20, 0.95),
   };
 };
 

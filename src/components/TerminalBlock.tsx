@@ -608,6 +608,9 @@ export const TerminalBlock = forwardRef<TerminalRef, TerminalBlockProps>(({
               data.includes('I can help with')) {
               isClaudeCodeRunningRef.current = true;
               setHideInputCard(true);
+              // Auto-focus the xterm terminal so the user can type directly
+              // (e.g. answer yes/no prompts in Claude Code)
+              setTimeout(() => term.focus(), 50);
             }
           }
 
@@ -661,20 +664,22 @@ export const TerminalBlock = forwardRef<TerminalRef, TerminalBlockProps>(({
       resizePty(rows, cols);
     });
 
-    // Handle window resize
-    const handleWindowResize = () => {
-      if (fitAddonRef.current) {
-        fitAddonRef.current.fit();
-      }
+    // Debounced fit helper — avoids calling fit() on every resize frame
+    let resizeTimer: ReturnType<typeof setTimeout> | null = null;
+    const debouncedFit = () => {
+      if (resizeTimer) clearTimeout(resizeTimer);
+      resizeTimer = setTimeout(() => {
+        if (fitAddonRef.current) fitAddonRef.current.fit();
+        resizeTimer = null;
+      }, 60);
     };
+
+    // Handle window resize
+    const handleWindowResize = () => debouncedFit();
     window.addEventListener("resize", handleWindowResize);
 
     // Observe container size changes
-    const resizeObserver = new ResizeObserver(() => {
-      if (fitAddonRef.current) {
-        fitAddonRef.current.fit();
-      }
-    });
+    const resizeObserver = new ResizeObserver(() => debouncedFit());
     resizeObserver.observe(containerRef.current);
 
     // Cleanup
@@ -683,6 +688,7 @@ export const TerminalBlock = forwardRef<TerminalRef, TerminalBlockProps>(({
       onResizeDisposable.dispose();
       window.removeEventListener("resize", handleWindowResize);
       resizeObserver.disconnect();
+      if (resizeTimer) clearTimeout(resizeTimer);
 
       if (unlistenOutputRef.current) {
         unlistenOutputRef.current();
@@ -759,8 +765,6 @@ ${npmScripts.length > 0 ? `Available npm scripts: ${npmScripts.join(', ')}.` : '
       const isAI = isAIRequest(value);
       setInputMode(isAI ? "ai" : "terminal");
 
-      // Debug logging to help users understand the classification
-      console.log(`Input: "${value}" -> ${isAI ? "AI" : "Terminal"} mode`);
 
       if (!isAI) {
         // Drop stale suggestion if the user typed past it
@@ -1000,17 +1004,11 @@ No project is loaded. Tell the user to open a project folder so you can see thei
       newUserMessage
     ];
 
-    console.log('🤖 Sending to AI:', {
-      prompt,
-      hasFileContext: !!(currentFile && currentFile.content),
-      messageCount: messages.length,
-      systemMessageLength: systemMessage.content.length
-    });
-
     let assistantMsgId = '';
     let accumulated = '';
     let isFirstChunk = true;
     let typingInterval: ReturnType<typeof setInterval> | null = null;
+    let streamRafId: number | null = null;
 
     try {
       // ── Create a streaming placeholder for the assistant ──────────────────
@@ -1066,7 +1064,12 @@ No project is loaded. Tell the user to open a project folder so you can see thei
             isFirstChunk = false;
           }
           accumulated += chunk;
-          setStreamingContent(accumulated);
+          // Batch state updates via rAF to avoid a re-render per chunk
+          if (streamRafId !== null) cancelAnimationFrame(streamRafId);
+          streamRafId = requestAnimationFrame(() => {
+            setStreamingContent(accumulated);
+            streamRafId = null;
+          });
         }
       });
 
@@ -1074,6 +1077,12 @@ No project is loaded. Tell the user to open a project folder so you can see thei
       if (isFirstChunk) {
         if (typingInterval) clearInterval(typingInterval);
         term.write(`\r\x1b[K`);
+      }
+      // Flush any pending batched streaming update
+      if (streamRafId !== null) {
+        cancelAnimationFrame(streamRafId);
+        streamRafId = null;
+        setStreamingContent(accumulated);
       }
 
       const content = accumulated || response.content;

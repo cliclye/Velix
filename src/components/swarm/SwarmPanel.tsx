@@ -43,7 +43,7 @@ type BoardStatusTone = 'queued' | 'mapping' | 'building' | 'review' | 'done' | '
 type WorkerCLIAvailability = Record<WorkerCLI, { available: boolean; detail: string }>;
 
 const MIN_AGENTS = 2;
-const MAX_AGENTS = 8;
+const MAX_AGENTS = 25;
 const WORKER_CLI_STORAGE_KEY = 'velix-swarm-worker-cli';
 const ROLE_ORDER: SwarmLaunchRole[] = ['scout', 'builder', 'reviewer'];
 const DEFAULT_ROLE_COUNTS: RoleCounts = {
@@ -52,9 +52,9 @@ const DEFAULT_ROLE_COUNTS: RoleCounts = {
   reviewer: 1,
 };
 const ROLE_LIMITS: Record<SwarmLaunchRole, { min: number; max: number }> = {
-  scout: { min: 0, max: 1 },
-  builder: { min: 1, max: 6 },
-  reviewer: { min: 0, max: 2 },
+  scout: { min: 0, max: 5 },
+  builder: { min: 1, max: 20 },
+  reviewer: { min: 0, max: 5 },
 };
 const ROLE_COPY: Record<SwarmLaunchRole, { caption: string; hint: string }> = {
   scout: {
@@ -748,7 +748,11 @@ export const SwarmPanel: React.FC<SwarmPanelProps> = ({
     const role = ROLE_ORDER.find((candidate) => candidate === roleValue);
     if (!role) return;
 
-    if (roleCounts[role] >= ROLE_LIMITS[role].max) {
+    const currentWorkerCount = buildRolesToLaunch(roleCounts).length;
+    const atRoleLimit = roleCounts[role] >= ROLE_LIMITS[role].max;
+    const atTotalLimit = currentWorkerCount >= MAX_AGENTS;
+
+    if (atRoleLimit || atTotalLimit) {
       const existingAssignment = [...boardAssignmentsBase]
         .reverse()
         .find((assignment) => assignment.role === role);
@@ -842,7 +846,7 @@ export const SwarmPanel: React.FC<SwarmPanelProps> = ({
             {ROLE_ORDER.map((role) => {
               const count = roleCounts[role];
               const limits = ROLE_LIMITS[role];
-              const swarmActive = agents.length > 0;
+              const swarmActive = agents.some((a) => !FINISHED_STATUSES.has(a.status));
               const canAddMore = count < limits.max && workerCount < MAX_AGENTS;
               const canPlace = !swarmActive && (canAddMore || count > 0);
               return (
