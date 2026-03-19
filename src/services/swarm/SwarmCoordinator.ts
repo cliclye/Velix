@@ -399,7 +399,7 @@ const resolveActionAssignmentId = (
   return null;
 };
 
-export class ClaudeCoordinator {
+export class SwarmCoordinator {
   async hasClaudeKey(): Promise<boolean> {
     return this.hasCoordinatorKey('claude');
   }
@@ -591,4 +591,4 @@ export class ClaudeCoordinator {
   }
 }
 
-export const claudeCoordinator = new ClaudeCoordinator();
+export const swarmCoordinator = new SwarmCoordinator();

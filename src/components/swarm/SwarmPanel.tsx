@@ -7,7 +7,9 @@ import {
   WORKER_CLI_OPTIONS,
   detectWorkerCLIAvailability,
 } from '../../services/swarm';
+import { CoordinatorConfig } from '../../services/swarm/ClaudeCoordinator';
 import { Agent, AgentRoleType, AgentStatus, WorkerCLI } from '../../services/swarm/types';
+import { PROVIDERS, ProviderID } from '../../services/ai/types';
 import { AgentTerminal } from './AgentTerminal';
 import {
   SwarmMindMap,
@@ -45,6 +47,8 @@ type WorkerCLIAvailability = Record<WorkerCLI, { available: boolean; detail: str
 const MIN_AGENTS = 2;
 const MAX_AGENTS = 25;
 const WORKER_CLI_STORAGE_KEY = 'velix-swarm-worker-cli';
+const COORDINATOR_PROVIDER_STORAGE_KEY = 'velix-swarm-coordinator-provider';
+const COORDINATOR_MODEL_STORAGE_KEY = 'velix-swarm-coordinator-model';
 const ROLE_ORDER: SwarmLaunchRole[] = ['scout', 'builder', 'reviewer'];
 const DEFAULT_ROLE_COUNTS: RoleCounts = {
   scout: 1,
@@ -325,6 +329,15 @@ export const SwarmPanel: React.FC<SwarmPanelProps> = ({
       ? (stored as WorkerCLI)
       : 'claude';
   });
+  const [coordinatorProvider, setCoordinatorProvider] = useState<ProviderID>(() => {
+    if (typeof window === 'undefined') return 'claude';
+    const stored = window.localStorage.getItem(COORDINATOR_PROVIDER_STORAGE_KEY);
+    return PROVIDERS.some((p) => p.id === stored) ? (stored as ProviderID) : 'claude';
+  });
+  const [coordinatorModel, setCoordinatorModel] = useState<string>(() => {
+    if (typeof window === 'undefined') return '';
+    return window.localStorage.getItem(COORDINATOR_MODEL_STORAGE_KEY) || '';
+  });
   const [workerCLIAvailability, setWorkerCLIAvailability] = useState<WorkerCLIAvailability>(
     buildDefaultWorkerCLIAvailability,
   );
@@ -332,7 +345,9 @@ export const SwarmPanel: React.FC<SwarmPanelProps> = ({
   const [expandedAgentId, setExpandedAgentId] = useState<string | null>(null);
   const [isLaunching, setIsLaunching] = useState(false);
   const [isSyncing, setIsSyncing] = useState(false);
-  const [hasClaudeKey, setHasClaudeKey] = useState(false);
+  const [hasCoordinatorKey, setHasCoordinatorKey] = useState(false);
+  // Keep hasClaudeKey alias for any existing references
+  const hasClaudeKey = hasCoordinatorKey;
   const [requirementsLoaded, setRequirementsLoaded] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [statusLabel, setStatusLabel] = useState('Idle');
@@ -377,22 +392,35 @@ export const SwarmPanel: React.FC<SwarmPanelProps> = ({
     let isMounted = true;
     setRequirementsLoaded(false);
 
-    claudeCoordinator.hasClaudeKey()
+    claudeCoordinator.hasCoordinatorKey(coordinatorProvider)
       .then((ready) => {
         if (!isMounted) return;
-        setHasClaudeKey(ready);
+        setHasCoordinatorKey(ready);
         setRequirementsLoaded(true);
       })
       .catch(() => {
         if (!isMounted) return;
-        setHasClaudeKey(false);
+        setHasCoordinatorKey(false);
         setRequirementsLoaded(true);
       });
 
     return () => {
       isMounted = false;
     };
-  }, [isOpen]);
+  }, [isOpen, coordinatorProvider]);
+
+  // Persist coordinator provider/model to localStorage
+  useEffect(() => {
+    if (typeof window !== 'undefined') {
+      window.localStorage.setItem(COORDINATOR_PROVIDER_STORAGE_KEY, coordinatorProvider);
+    }
+  }, [coordinatorProvider]);
+
+  useEffect(() => {
+    if (typeof window !== 'undefined') {
+      window.localStorage.setItem(COORDINATOR_MODEL_STORAGE_KEY, coordinatorModel);
+    }
+  }, [coordinatorModel]);
 
   useEffect(() => {
     if (!isOpen || !workspacePath) return;
@@ -495,11 +523,17 @@ export const SwarmPanel: React.FC<SwarmPanelProps> = ({
     );
 
     try {
+      const selectedProviderConfig = PROVIDERS.find((p) => p.id === coordinatorProvider);
+      const effectiveModel = coordinatorModel || selectedProviderConfig?.models[0] || '';
+      const apiKey = await claudeCoordinator.getCoordinatorApiKey(coordinatorProvider);
+      const coordinatorConfig: CoordinatorConfig = { provider: coordinatorProvider, model: effectiveModel, apiKey };
+
       const syncResult = await claudeCoordinator.createSyncResult(
         activeGoal,
         workspacePath,
         syncPlan,
         snapshot,
+        coordinatorConfig,
       );
 
       setLastSync(syncResult);
@@ -529,7 +563,7 @@ export const SwarmPanel: React.FC<SwarmPanelProps> = ({
     } finally {
       setIsSyncing(false);
     }
-  }, [activeGoal, appendLog, coordinatorPlan, isSyncing, manualConnections, refreshAgents, workspacePath]);
+  }, [activeGoal, appendLog, coordinatorModel, coordinatorPlan, coordinatorProvider, isSyncing, manualConnections, refreshAgents, workspacePath]);
 
   useEffect(() => {
     stopAutoSync();
@@ -548,6 +582,13 @@ export const SwarmPanel: React.FC<SwarmPanelProps> = ({
 
     return stopAutoSync;
   }, [activeGoal, coordinatorPlan, handleCoordinatorSync, isLaunching, isSyncing, stopAutoSync]);
+
+  const handleCoordinatorProviderChange = useCallback((provider: ProviderID) => {
+    setCoordinatorProvider(provider);
+    // Reset model to first available for new provider
+    const firstModel = PROVIDERS.find((p) => p.id === provider)?.models[0] ?? '';
+    setCoordinatorModel(firstModel);
+  }, []);
 
   const adjustRoleCount = useCallback((role: SwarmLaunchRole, delta: number) => {
     setRoleCounts((prev) => {
@@ -575,8 +616,9 @@ export const SwarmPanel: React.FC<SwarmPanelProps> = ({
       setError('Open a project before launching a swarm.');
       return;
     }
-    if (!hasClaudeKey) {
-      setError('Swarm coordinator requires a Claude API key in Settings.');
+    if (!hasCoordinatorKey) {
+      const providerName = PROVIDERS.find((p) => p.id === coordinatorProvider)?.name || coordinatorProvider;
+      setError(`Swarm coordinator requires a ${providerName} API key in Settings.`);
       return;
     }
     if (!trimmedGoal) {
@@ -608,7 +650,12 @@ export const SwarmPanel: React.FC<SwarmPanelProps> = ({
 
       manager.setWorkerCLI(workerCLI);
 
-      const rawPlan = await claudeCoordinator.createLaunchPlan(trimmedGoal, workspacePath, rolesToLaunch);
+      const selectedProviderConfig = PROVIDERS.find((p) => p.id === coordinatorProvider);
+      const effectiveModel = coordinatorModel || selectedProviderConfig?.models[0] || '';
+      const apiKey = await claudeCoordinator.getCoordinatorApiKey(coordinatorProvider);
+      const coordinatorConfig: CoordinatorConfig = { provider: coordinatorProvider, model: effectiveModel, apiKey };
+
+      const rawPlan = await claudeCoordinator.createLaunchPlan(trimmedGoal, workspacePath, rolesToLaunch, coordinatorConfig);
       const plan = {
         ...rawPlan,
         assignments: applyManualConnectionsToAssignments(rawPlan.assignments, manualConnections),
@@ -640,8 +687,10 @@ export const SwarmPanel: React.FC<SwarmPanelProps> = ({
     }
   }, [
     appendLog,
+    coordinatorModel,
+    coordinatorProvider,
     goal,
-    hasClaudeKey,
+    hasCoordinatorKey,
     isLaunching,
     refreshAgents,
     roleCounts,
@@ -716,12 +765,12 @@ export const SwarmPanel: React.FC<SwarmPanelProps> = ({
   const canLaunch = useMemo(() => Boolean(
     goal.trim() &&
     workspacePath &&
-    hasClaudeKey &&
+    hasCoordinatorKey &&
     rolesReady &&
     !isCheckingWorkerCLI &&
     selectedWorkerCLIStatus?.available &&
     !isLaunching,
-  ), [goal, workspacePath, hasClaudeKey, rolesReady, isCheckingWorkerCLI, selectedWorkerCLIStatus, isLaunching]);
+  ), [goal, workspacePath, hasCoordinatorKey, rolesReady, isCheckingWorkerCLI, selectedWorkerCLIStatus, isLaunching]);
   const workspaceName = useMemo(() => workspacePath ? getWorkspaceName(workspacePath) : 'workspace', [workspacePath]);
   const previewAssignments = useMemo(() => buildPreviewAssignments(rolesToLaunch), [rolesToLaunch]);
   const boardAssignmentsBase = useMemo(
@@ -973,7 +1022,7 @@ export const SwarmPanel: React.FC<SwarmPanelProps> = ({
             />
             <div className="swarm-config-row">
               <div className="swarm-runtime-hint">
-                Coordinator uses Claude API. Workers launch with {selectedWorkerCLIOption.name} in this workspace with explicit ownership boundaries.
+                Coordinator uses {PROVIDERS.find((p) => p.id === coordinatorProvider)?.name || coordinatorProvider}. Workers launch with {selectedWorkerCLIOption.name} in this workspace with explicit ownership boundaries.
               </div>
               <div className="swarm-runtime-hint">
                 Recommended shape: 1 scout, 2 builders, 1 reviewer. Add more builders only when the work cleanly splits by files or modules.
@@ -1063,6 +1112,57 @@ export const SwarmPanel: React.FC<SwarmPanelProps> = ({
 
           <div className="swarm-section">
             <div className="swarm-section-head">
+              <h3>Coordinator AI</h3>
+              <span>{requirementsLoaded ? (hasCoordinatorKey ? 'key ready' : 'no key') : 'checking'}</span>
+            </div>
+            <div className="swarm-cli-grid">
+              {PROVIDERS.map((provider) => {
+                const selected = coordinatorProvider === provider.id;
+                return (
+                  <button
+                    key={provider.id}
+                    type="button"
+                    className={`swarm-cli-card ${selected ? 'selected' : ''}`}
+                    onClick={() => handleCoordinatorProviderChange(provider.id)}
+                  >
+                    <div className="swarm-cli-head">
+                      <span className="swarm-cli-name">{provider.name}</span>
+                      {selected && (
+                        <span className={`swarm-cli-badge ${hasCoordinatorKey ? 'available' : 'unavailable'}`}>
+                          {hasCoordinatorKey ? 'Key set' : 'No key'}
+                        </span>
+                      )}
+                    </div>
+                    <span className="swarm-cli-desc">
+                      {provider.models.slice(0, 2).join(', ')}
+                    </span>
+                  </button>
+                );
+              })}
+            </div>
+            {(() => {
+              const models = PROVIDERS.find((p) => p.id === coordinatorProvider)?.models ?? [];
+              const effectiveModel = coordinatorModel || models[0] || '';
+              if (models.length === 0) return null;
+              return (
+                <div className="swarm-coordinator-model-row">
+                  <label className="swarm-coordinator-model-label">Model</label>
+                  <select
+                    className="swarm-coordinator-model-select"
+                    value={effectiveModel}
+                    onChange={(e) => setCoordinatorModel(e.target.value)}
+                  >
+                    {models.map((model) => (
+                      <option key={model} value={model}>{model}</option>
+                    ))}
+                  </select>
+                </div>
+              );
+            })()}
+          </div>
+
+          <div className="swarm-section">
+            <div className="swarm-section-head">
               <h3>Operating Model</h3>
               <span>Coordinator-enforced rules</span>
             </div>
@@ -1100,9 +1200,9 @@ export const SwarmPanel: React.FC<SwarmPanelProps> = ({
             </div>
           )}
 
-          {requirementsLoaded && !hasClaudeKey && (
+          {requirementsLoaded && !hasCoordinatorKey && (
             <div className="swarm-requirement warning">
-              Add a Claude API key in Settings. The coordinator still depends on Claude API even if your terminal AI provider is different.
+              Add a {PROVIDERS.find((p) => p.id === coordinatorProvider)?.name || coordinatorProvider} API key in Settings. The coordinator needs this key to plan and sync the swarm.
             </div>
           )}
 
