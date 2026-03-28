@@ -31,6 +31,9 @@ src-tauri/icons/android/
 src-tauri/icons/ios/
 src-tauri/icons/64x64.png
 
+# Swarm prompt temp files
+.velix_swarm_prompt_*
+
 # Local secrets
 .env
 .env.*

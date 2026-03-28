@@ -326,6 +326,8 @@ export const SwarmPanel: React.FC<SwarmPanelProps> = ({
   const syncIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
   /** Prevents overlapping coordinator syncs when the 45s interval fires with a stale `isSyncing` closure. */
   const coordinatorSyncInFlightRef = useRef(false);
+  /** Abort controller for the current swarm run — allows mid-flight cancellation. */
+  const swarmAbortRef = useRef<AbortController | null>(null);
 
   const [agents, setAgents] = useState<Agent[]>([]);
   const [goal, setGoal] = useState('');
@@ -656,6 +658,11 @@ export const SwarmPanel: React.FC<SwarmPanelProps> = ({
       return;
     }
 
+    // Abort any previous run and create a new controller for this one
+    swarmAbortRef.current?.abort();
+    const abort = new AbortController();
+    swarmAbortRef.current = abort;
+
     setIsLaunching(true);
     setError(null);
     setStatusLabel('Coordinator Planning');
@@ -693,9 +700,14 @@ export const SwarmPanel: React.FC<SwarmPanelProps> = ({
         reviews: new Map<string, string>(),     // Reviewer outputs keyed by label
       };
 
-      // Helper: wait for a set of agent IDs to finish, return their outputs by assignment label
+      // Helper: wait for a set of agent IDs to finish, return their outputs by assignment label.
+      // Includes a per-agent stall timeout: if an agent has no output activity for this long,
+      // it is forcibly terminated so the swarm can proceed.
+      const AGENT_STALL_TIMEOUT_MS = 120_000; // 2 minutes of no activity
+      const AGENT_STALL_CHECK_INTERVAL_MS = 10_000; // check every 10 seconds
+
       const waitForAgents = (agentIds: string[]): Promise<Map<string, string>> =>
-        new Promise<Map<string, string>>((resolve) => {
+        new Promise<Map<string, string>>((resolve, reject) => {
           if (agentIds.length === 0) {
             resolve(new Map());
             return;
@@ -704,6 +716,24 @@ export const SwarmPanel: React.FC<SwarmPanelProps> = ({
           const outputs = new Map<string, string>();
           const pending = new Set(agentIds);
           let resolved = false;
+
+          const finish = () => {
+            if (resolved) return;
+            resolved = true;
+            unsubscribe();
+            clearInterval(stallChecker);
+            abort.signal.removeEventListener('abort', onAbort);
+            resolve(outputs);
+          };
+
+          const onAbort = () => {
+            if (resolved) return;
+            resolved = true;
+            unsubscribe();
+            clearInterval(stallChecker);
+            reject(new DOMException('Swarm stopped by user', 'AbortError'));
+          };
+          abort.signal.addEventListener('abort', onAbort);
 
           const collectAgent = (agentId: string) => {
             const agent = manager.getAgent(agentId);
@@ -716,12 +746,30 @@ export const SwarmPanel: React.FC<SwarmPanelProps> = ({
           const unsubscribe = manager.onAgentExit((agentId) => {
             if (resolved || !pending.delete(agentId)) return;
             collectAgent(agentId);
-            if (pending.size === 0) {
-              resolved = true;
-              unsubscribe();
-              resolve(outputs);
-            }
+            if (pending.size === 0) finish();
           });
+
+          // Periodically check for stalled agents and terminate them
+          const stallChecker = setInterval(() => {
+            if (resolved) { clearInterval(stallChecker); return; }
+            const now = Date.now();
+            for (const id of pending) {
+              const agent = manager.getAgent(id);
+              if (!agent) { pending.delete(id); continue; }
+              // Also pick up agents that finished without us noticing
+              if (FINISHED_STATUSES.has(agent.status)) {
+                pending.delete(id);
+                collectAgent(id);
+                continue;
+              }
+              const timeSinceActivity = now - agent.lastActivityAt.getTime();
+              if (timeSinceActivity > AGENT_STALL_TIMEOUT_MS) {
+                appendLog('error', `Agent ${agent.label || id} stalled (no activity for ${Math.round(timeSinceActivity / 1000)}s) — terminating.`);
+                void manager.terminateAgent(id, 'Stall timeout');
+              }
+            }
+            if (pending.size === 0) finish();
+          }, AGENT_STALL_CHECK_INTERVAL_MS);
 
           // Check agents that already exited before subscription
           for (const id of agentIds) {
@@ -730,11 +778,7 @@ export const SwarmPanel: React.FC<SwarmPanelProps> = ({
               if (pending.delete(id)) collectAgent(id);
             }
           }
-          if (!resolved && pending.size === 0) {
-            resolved = true;
-            unsubscribe();
-            resolve(outputs);
-          }
+          if (!resolved && pending.size === 0) finish();
         });
 
       // Helper: spawn a wave of assignments, return their agent IDs.
@@ -790,6 +834,7 @@ export const SwarmPanel: React.FC<SwarmPanelProps> = ({
         setStatusLabel('Scout Mapping');
         const scoutIds = await spawnWave(scoutAssignments);
         const scoutOutputs = await waitForAgents(scoutIds);
+        if (abort.signal.aborted) return;
         for (const [label, output] of scoutOutputs) swarmState.research.set(label, output);
         appendLog('dispatch', `Scout wave complete: ${scoutAssignments.map((a) => a.label).join(', ')}`);
         refreshAgents();
@@ -817,7 +862,7 @@ export const SwarmPanel: React.FC<SwarmPanelProps> = ({
       let approved = false;
       let lastRevisionInstructions = '';
 
-      while (!approved && iteration < MAX_REVIEW_ITERATIONS) {
+      while (!approved && iteration < MAX_REVIEW_ITERATIONS && !abort.signal.aborted) {
         iteration++;
         const isRevision = iteration > 1;
 
@@ -884,17 +929,24 @@ export const SwarmPanel: React.FC<SwarmPanelProps> = ({
       refreshAgents();
       setStatusLabel(approved ? 'Complete' : 'Running');
     } catch (err) {
-      const message = err instanceof Error ? err.message : String(err);
-      setError(`Failed to launch swarm: ${message}`);
-      appendLog('error', `Launch failed: ${message}`);
-      setStatusLabel('Launch Error');
-      // Clean up any spawned agents on failure
-      const manager = managerRef.current;
-      if (manager) {
-        await manager.terminateAll();
-        refreshAgents();
+      if (err instanceof DOMException && err.name === 'AbortError') {
+        // User stopped the swarm — agents already terminated by handleStopSwarm
+        appendLog('dispatch', 'Swarm stopped by user.');
+        setStatusLabel('Stopped');
+      } else {
+        const message = err instanceof Error ? err.message : String(err);
+        setError(`Failed to launch swarm: ${message}`);
+        appendLog('error', `Launch failed: ${message}`);
+        setStatusLabel('Launch Error');
+        // Clean up any spawned agents on failure
+        const manager = managerRef.current;
+        if (manager) {
+          await manager.terminateAll();
+          refreshAgents();
+        }
       }
     } finally {
+      swarmAbortRef.current = null;
       setIsLaunching(false);
     }
   }, [
@@ -934,6 +986,18 @@ export const SwarmPanel: React.FC<SwarmPanelProps> = ({
     setAgentChatMsg('');
     appendLog('dispatch', 'Terminated all swarm agents.');
   }, [appendLog, stopAutoSync]);
+
+  const handleStopSwarm = useCallback(async () => {
+    // Signal the running launch loop to abort
+    swarmAbortRef.current?.abort();
+    // Terminate all live agents immediately
+    const manager = managerRef.current;
+    if (manager) {
+      await manager.terminateAll('Swarm stopped by user');
+    }
+    stopAutoSync();
+    refreshAgents();
+  }, [refreshAgents, stopAutoSync]);
 
   const handleSendInput = useCallback(async (agentId: string, data: string) => {
     const manager = managerRef.current;
@@ -1489,9 +1553,15 @@ export const SwarmPanel: React.FC<SwarmPanelProps> = ({
           </div>
 
           <div className="swarm-actions">
-            <button className="swarm-primary-btn" onClick={handleLaunch} disabled={!canLaunch}>
-              {isLaunching ? 'Launching…' : `Launch ${workerCount}-Worker Swarm${maxMode ? ' (MAX)' : ''}`}
-            </button>
+            {isLaunching ? (
+              <button className="swarm-danger-btn" onClick={handleStopSwarm}>
+                Stop Swarm
+              </button>
+            ) : (
+              <button className="swarm-primary-btn" onClick={handleLaunch} disabled={!canLaunch}>
+                {`Launch ${workerCount}-Worker Swarm${maxMode ? ' (MAX)' : ''}`}
+              </button>
+            )}
           </div>
         </div>
 

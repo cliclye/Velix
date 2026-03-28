@@ -3,7 +3,7 @@
  * Handles spawning, monitoring, and terminating agents
  */
 
-import { invoke, listen, type UnlistenFn } from '../../platform/native';
+import { invoke, listen, type UnlistenFn, writeTextFile, remove } from '../../platform/native';
 import {
   Agent,
   AgentRole,
@@ -38,6 +38,13 @@ const CLI_MIN_STARTUP_MS = 4000;
 const CLI_FALLBACK_TIMEOUT_MS = 20000;
 const READY_ACCUMULATOR_MAX_CHARS = 2000;
 
+// After the initial prompt is delivered, we accumulate output to detect when the CLI
+// returns to its idle prompt (meaning the task is done). When detected, we send /exit.
+const IDLE_ACCUMULATOR_MAX_CHARS = 2000;
+// Minimum time (ms) after delivering the prompt before we start checking for idle state.
+// Prevents false-positives from echoed prompt text or early output.
+const IDLE_MIN_WORKING_MS = 10000;
+
 // Patterns that indicate a CLI is showing its input prompt and ready for a message.
 // These are tested against the ACCUMULATED sanitized output (not individual chunks).
 const CLI_READY_PATTERNS = [
@@ -48,8 +55,15 @@ const CLI_READY_PATTERNS = [
   /\?\s*$/m,             // Gemini-style "?" prompt
 ];
 
-const BRACKETED_PASTE_START = '\u001b[200~';
-const BRACKETED_PASTE_END = '\u001b[201~';
+// Patterns that indicate the CLI has returned to idle after completing a task.
+// Tested against the LAST ~100 chars of accumulated output (not the whole buffer)
+// to avoid false-positives from content lines containing ">" or "?".
+const CLI_IDLE_PATTERNS = [
+  />\s*$/,               // Claude Code: prompt ending with ">"
+  /\?\s*$/,              // Gemini-style "?" prompt
+];
+
+
 
 const ANSI_ESCAPE_REGEX = /\u001B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])|\u009B[0-?]*[ -/]*[@-~]/g;
 
@@ -178,6 +192,10 @@ export class AgentManager {
   private readyAccumulator: Map<string, string> = new Map();
   // Timestamp when the CLI launch command was sent (to enforce minimum startup delay)
   private cliLaunchedAt: Map<string, number> = new Map();
+  // Agents whose initial prompt has been delivered — we now watch for them to return to idle
+  private promptDeliveredAt: Map<string, number> = new Map();
+  // Accumulated sanitized output after prompt delivery (for idle detection)
+  private idleAccumulator: Map<string, string> = new Map();
 
   constructor(eventEmitter: SwarmEventEmitter, workspacePath: string) {
     this.eventEmitter = eventEmitter;
@@ -235,6 +253,8 @@ export class AgentManager {
     for (const unlisten of this.exitListeners.values()) {
       unlisten();
     }
+    this.promptDeliveredAt.clear();
+    this.idleAccumulator.clear();
     for (const agentId of new Set([
       ...this.pendingPrompts.keys(),
       ...this.pendingPromptTimers.keys(),
@@ -292,6 +312,32 @@ export class AgentManager {
       }
     }
 
+    // If the prompt was already delivered, check if the CLI has returned to idle (task done)
+    if (this.promptDeliveredAt.has(agentId) && agent.status === 'running') {
+      const prev = this.idleAccumulator.get(agentId) || '';
+      const accumulated = (prev + sanitizedData).slice(-IDLE_ACCUMULATOR_MAX_CHARS);
+      this.idleAccumulator.set(agentId, accumulated);
+
+      const deliveredAt = this.promptDeliveredAt.get(agentId) || 0;
+      if (Date.now() - deliveredAt >= IDLE_MIN_WORKING_MS) {
+        // Only test the last ~100 chars to avoid matching ">" in content lines
+        const tail = accumulated.slice(-100);
+        const isIdle = CLI_IDLE_PATTERNS.some((pattern) => pattern.test(tail));
+        if (isIdle) {
+          console.log(`AgentManager: CLI returned to idle for ${agentId} — sending /exit`);
+          this.promptDeliveredAt.delete(agentId);
+          this.idleAccumulator.delete(agentId);
+          // Send /exit to gracefully close the CLI, which will trigger the pty-exit event
+          void invoke('pty_write', {
+            sessionId: agent.sessionId,
+            data: '/exit\r',
+          }).catch((error) => {
+            console.error(`AgentManager: failed to send /exit to agent ${agentId}:`, error);
+          });
+        }
+      }
+    }
+
     // Update last activity
     agent.lastActivityAt = new Date();
     agent.terminalOutput = (agent.terminalOutput + data).slice(-MAX_TERMINAL_OUTPUT_CHARS);
@@ -342,6 +388,13 @@ export class AgentManager {
     const agent = this.agents.get(agentId);
     if (!agent) return;
     this.clearPendingPromptState(agentId);
+    this.promptDeliveredAt.delete(agentId);
+    this.idleAccumulator.delete(agentId);
+
+    // Clean up the prompt file (best-effort)
+    if (agent.promptFilePath) {
+      remove(agent.promptFilePath).catch(() => {});
+    }
 
     // Update status
     agent.status = exitCode === 0 ? 'completed' : 'failed';
@@ -404,10 +457,8 @@ export class AgentManager {
       cwd: this.workspacePath,
     });
 
-    // Build the prompt text (to be typed AFTER the CLI starts)
+    // Build the prompt text
     const prompt = this.buildPrompt(role, task);
-    // Step 1: just open the CLI interactively
-    const startCommand = this.buildWorkerStartCommand();
 
     // Create agent object
     const agent: Agent = {
@@ -435,17 +486,29 @@ export class AgentManager {
 
     this.agents.set(agentId, agent);
 
-    // Step 1: open the CLI (e.g. `claude --dangerously-skip-permissions`)
+    // Strategy: write the full prompt to a file in the workspace, then start the CLI
+    // interactively and send a SHORT single-line instruction telling the AI to read it.
+    // This avoids all bracketed-paste / multi-line submission issues entirely.
+    const promptFileName = `.velix_swarm_prompt_${agentId}.txt`;
+    const promptFilePath = `${this.workspacePath}/${promptFileName}`;
+    agent.promptFilePath = promptFilePath;
+
+    try {
+      await writeTextFile(promptFilePath, prompt);
+    } catch (err) {
+      console.error('AgentManager: failed to write prompt file:', err);
+    }
+
+    // Step 1: launch the CLI interactively (this part works reliably)
+    const startCommand = this.buildWorkerStartCommand();
     this.cliLaunchedAt.set(agentId, Date.now());
     this.readyAccumulator.set(agentId, '');
-    await invoke('pty_write', {
-      sessionId,
-      data: startCommand,
-    });
+    await invoke('pty_write', { sessionId, data: startCommand });
 
-    // Step 2: store the prompt — it will be sent once the CLI shows its ready indicator.
-    // A fallback timer fires after CLI_FALLBACK_TIMEOUT_MS in case the ready pattern isn't detected.
-    this.pendingPrompts.set(agentId, prompt);
+    // Step 2: once the CLI is ready, send a short single-line instruction to read the prompt file.
+    // This is just plain text + Enter — no bracketed paste, no multi-line escaping.
+    const shortInstruction = `Read the file ${promptFileName} in the current directory. It contains your full task instructions. Follow every instruction in that file exactly — do not summarize or skip anything. Begin working immediately.`;
+    this.pendingPrompts.set(agentId, shortInstruction);
     const fallbackTimer = setTimeout(() => {
       const a = this.agents.get(agentId);
       if (a && this.pendingPrompts.has(agentId)) {
@@ -490,8 +553,8 @@ Task: ${task}`;
   }
 
   /**
-   * Build the command that opens the CLI in interactive mode.
-   * The task prompt is NOT passed here — it is typed in after the CLI starts.
+   * Build the command that opens the CLI in interactive mode (no prompt).
+   * Used only as a fallback when print-mode is not available.
    */
   private buildWorkerStartCommand(): string {
     const config = aiService.getConfig();
@@ -537,29 +600,27 @@ Task: ${task}`;
     return parts.join(' ') + '\r';
   }
 
+
   /**
    * Deliver a pending prompt to an agent whose CLI is now ready for input.
    *
-   * Swarm prompts are deliberately multi-line. Use bracketed paste so the PTY
-   * preserves that structure without interpreting embedded newlines as separate
-   * submit keypresses before the final `\r`.
+   * The prompt is now a SHORT single-line instruction (e.g. "Read file X and follow it")
+   * so no bracketed paste is needed — just plain text + Enter.
    */
   private async deliverPendingPrompt(agent: Agent): Promise<void> {
     const prompt = this.pendingPrompts.get(agent.id);
     if (!prompt) return;
     this.clearPendingPromptState(agent.id);
 
-    const normalizedPrompt = prompt
-      .replace(/\r\n/g, '\n')
-      .replace(/\r/g, '\n');
-    const payload = normalizedPrompt.includes('\n')
-      ? `${BRACKETED_PASTE_START}${normalizedPrompt}${BRACKETED_PASTE_END}\r`
-      : `${normalizedPrompt}\r`;
+    // Start tracking idle state — the CLI is now "working" on the task
+    this.promptDeliveredAt.set(agent.id, Date.now());
+    this.idleAccumulator.set(agent.id, '');
 
     try {
+      // Send the instruction as plain text + Enter
       await invoke('pty_write', {
         sessionId: agent.sessionId,
-        data: payload,
+        data: `${prompt}\r`,
       });
     } catch (error) {
       console.error(`AgentManager: failed to deliver prompt to agent ${agent.id}:`, error);
@@ -607,6 +668,13 @@ Task: ${task}`;
     const agent = this.agents.get(agentId);
     if (!agent) return;
     this.clearPendingPromptState(agentId);
+    this.promptDeliveredAt.delete(agentId);
+    this.idleAccumulator.delete(agentId);
+
+    // Clean up the prompt file (best-effort)
+    if (agent.promptFilePath) {
+      remove(agent.promptFilePath).catch(() => {});
+    }
 
     try {
       // Send Ctrl+C first to gracefully stop

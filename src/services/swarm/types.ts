@@ -100,6 +100,7 @@ export interface Agent {
   outputBuffer: string[]; // Rolling buffer of last N lines
   terminalOutput: string; // Raw PTY stream used for terminal replay
   metrics: AgentMetrics;
+  promptFilePath?: string; // Temp file containing the full prompt for this agent
 }
 
 export interface AgentAssignment {
