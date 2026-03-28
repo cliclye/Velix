@@ -585,7 +585,7 @@ export const TerminalBlock = forwardRef<TerminalRef, TerminalBlockProps>(({
       fontSize: 13,
       fontFamily: "'JetBrains Mono', 'Fira Code', 'SF Mono', 'Menlo', 'Monaco', monospace",
       letterSpacing: 0,
-      lineHeight: 1.02,
+      lineHeight: 1.01,
       allowProposedApi: true,
       scrollback: 10000,
       theme: theme === "light" ? LIGHT_TERMINAL_THEME : DARK_TERMINAL_THEME,
