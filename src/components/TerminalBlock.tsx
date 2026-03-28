@@ -690,30 +690,53 @@ export const TerminalBlock = forwardRef<TerminalRef, TerminalBlockProps>(({
       writeToPty(data);
     });
 
-    // Handle terminal resize
+    // --- Resize strategy ---
+    // We decouple the visual fit (xterm reflow) from the PTY resize signal.
+    //
+    // fitAddon.fit() must run fairly quickly so the terminal *looks* correct,
+    // but pty_resize (which sends SIGWINCH to the running CLI) must only fire
+    // ONCE after resizing fully stops. Otherwise TUI apps like Claude Code
+    // redraw at every intermediate size, pushing old content into scrollback
+    // and corrupting the display.
+    //
+    // Flow:
+    //   container size changes → debounced fit (100ms) → xterm reflows visually
+    //   term.onResize fires → stores pending dims (does NOT call pty_resize)
+    //   after 500ms of no further resizes → send pty_resize with final dims
+    //                                     → scroll terminal to bottom
+
+    let pendingPtyDims: { rows: number; cols: number } | null = null;
+    let ptyResizeTimer: ReturnType<typeof setTimeout> | null = null;
+
+    const flushPtyResize = () => {
+      if (ptyResizeTimer) clearTimeout(ptyResizeTimer);
+      ptyResizeTimer = setTimeout(() => {
+        if (pendingPtyDims) {
+          resizePty(pendingPtyDims.rows, pendingPtyDims.cols);
+          // Scroll to bottom after CLI has time to redraw
+          setTimeout(() => term.scrollToBottom(), 80);
+          pendingPtyDims = null;
+        }
+        ptyResizeTimer = null;
+      }, 500);
+    };
+
+    // When xterm recalculates dimensions, DON'T send to PTY immediately —
+    // just record the latest dims and reset the flush timer.
     const onResizeDisposable = term.onResize(({ rows, cols }) => {
-      resizePty(rows, cols);
+      pendingPtyDims = { rows, cols };
+      flushPtyResize();
     });
 
-    // Debounced fit helper — waits for resize/transitions to settle before
-    // calling fit(). Uses a longer debounce (150ms) so intermediate sizes
-    // during CSS transitions don't send SIGWINCH storms to running CLIs.
-    // A trailing fit at 400ms catches cases where the transition easing
-    // slightly overshoots or the container takes longer to settle.
-    let resizeTimer: ReturnType<typeof setTimeout> | null = null;
-    let trailingTimer: ReturnType<typeof setTimeout> | null = null;
+    // Debounced visual fit — runs on a short debounce so the terminal looks
+    // correct quickly, but won't trigger pty_resize (that's handled above).
+    let fitTimer: ReturnType<typeof setTimeout> | null = null;
     const debouncedFit = () => {
-      if (resizeTimer) clearTimeout(resizeTimer);
-      if (trailingTimer) clearTimeout(trailingTimer);
-      resizeTimer = setTimeout(() => {
+      if (fitTimer) clearTimeout(fitTimer);
+      fitTimer = setTimeout(() => {
         if (fitAddonRef.current) fitAddonRef.current.fit();
-        resizeTimer = null;
-        // Schedule a trailing fit to catch post-transition layout shifts
-        trailingTimer = setTimeout(() => {
-          if (fitAddonRef.current) fitAddonRef.current.fit();
-          trailingTimer = null;
-        }, 300);
-      }, 150);
+        fitTimer = null;
+      }, 100);
     };
 
     // Handle window resize
@@ -732,8 +755,8 @@ export const TerminalBlock = forwardRef<TerminalRef, TerminalBlockProps>(({
       onResizeDisposable.dispose();
       window.removeEventListener("resize", handleWindowResize);
       resizeObserver.disconnect();
-      if (resizeTimer) clearTimeout(resizeTimer);
-      if (trailingTimer) clearTimeout(trailingTimer);
+      if (fitTimer) clearTimeout(fitTimer);
+      if (ptyResizeTimer) clearTimeout(ptyResizeTimer);
 
       if (unlistenOutputRef.current) {
         unlistenOutputRef.current();
