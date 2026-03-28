@@ -647,7 +647,10 @@ export const SwarmMindMap: React.FC<SwarmMindMapProps> = ({
           }}
         >
           <div className="smm-coordinator-card">
-            <span className="smm-coordinator-label">Coordinator</span>
+            <span className="smm-coordinator-label">
+              {isActive && <span className="smm-spinner" />}
+              Coordinator
+            </span>
             <strong>Swarm control lane</strong>
             <span className="smm-coordinator-status">
               {truncateText(coordinatorStatus || 'Idle', 24)}
@@ -704,15 +707,17 @@ export const SwarmMindMap: React.FC<SwarmMindMapProps> = ({
               />
 
               <div className="smm-agent-card-shell">
+                {isRunning && <span className="smm-activity-pulse" style={{ background: node.statusColor }} />}
                 <div className="smm-agent-node-head">
                   <span className="smm-agent-node-role">{node.role}</span>
                   <span className="smm-node-badge" style={{ background: node.statusColor }}>
+                    {isRunning && <span className="smm-spinner" />}
                     {node.statusLabel || formatTone(node.tone)}
                   </span>
                 </div>
 
                 <strong className="smm-agent-node-title">{truncateText(node.label, 24)}</strong>
-                <span className="smm-agent-node-caption">Working on</span>
+                <span className="smm-agent-node-caption">{isRunning ? 'Working on' : node.tone === 'done' ? 'Completed' : 'Awaiting launch'}</span>
                 <span className="smm-agent-node-work">
                   {truncateText(node.workingOn || 'Awaiting launch', 32)}
                 </span>

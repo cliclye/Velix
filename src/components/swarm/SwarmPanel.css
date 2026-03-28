@@ -1008,7 +1008,6 @@
   display: flex;
   flex-direction: column;
   overflow: hidden;
-  border-right: 1px solid var(--border-default);
   background: var(--bg-primary);
   position: relative;
 }
@@ -1319,7 +1318,7 @@
   .swarm-mindmap-pane {
     flex: 0 0 240px;
     border-right: none;
-    border-bottom: 1px solid var(--border-default);
+    border-bottom: none;
   }
   .swarm-control-pane {
     flex: 1 1 auto;
@@ -1380,6 +1379,89 @@
   min-width: 32px;
   text-align: center;
   padding: 0 2px;
+}
+
+/* =====================================================
+   ACTIVITY INDICATORS — show which agents are working
+   ===================================================== */
+
+/* Pulsing dot on the card border for running agents */
+.smm-activity-pulse {
+  position: absolute;
+  top: 8px;
+  right: 8px;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  opacity: 0.9;
+  animation: smm-pulse 1.8s ease-in-out infinite;
+  z-index: 2;
+  pointer-events: none;
+}
+
+@keyframes smm-pulse {
+  0%, 100% {
+    transform: scale(1);
+    opacity: 0.9;
+    box-shadow: 0 0 0 0 currentColor;
+  }
+  50% {
+    transform: scale(1.15);
+    opacity: 1;
+    box-shadow: 0 0 0 6px transparent;
+  }
+}
+
+/* Small spinning indicator inside badges */
+.smm-spinner {
+  display: inline-block;
+  width: 8px;
+  height: 8px;
+  border: 1.5px solid currentColor;
+  border-top-color: transparent;
+  border-radius: 50%;
+  animation: smm-spin 0.8s linear infinite;
+  margin-right: 4px;
+  vertical-align: middle;
+  flex-shrink: 0;
+}
+
+@keyframes smm-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+/* Glow ring around running agent cards */
+.smm-agent-node.smm-running .smm-agent-card-shell {
+  animation: smm-glow-ring 2.5s ease-in-out infinite;
+}
+
+@keyframes smm-glow-ring {
+  0%, 100% {
+    box-shadow: 0 14px 28px rgba(0, 0, 0, 0.1),
+                0 0 0 0 color-mix(in srgb, var(--status-color) 0%, transparent);
+  }
+  50% {
+    box-shadow: 0 14px 28px rgba(0, 0, 0, 0.1),
+                0 0 0 3px color-mix(in srgb, var(--status-color) 18%, transparent);
+  }
+}
+
+/* Active coordinator gets a subtle pulse too */
+.smm-coordinator-node.smm-active .smm-coordinator-card {
+  animation: smm-coord-pulse 2.5s ease-in-out infinite;
+}
+
+@keyframes smm-coord-pulse {
+  0%, 100% {
+    box-shadow: 0 20px 36px rgba(0, 0, 0, 0.12),
+                0 0 0 0 color-mix(in srgb, var(--accent-primary) 0%, transparent);
+  }
+  50% {
+    box-shadow: 0 20px 36px rgba(0, 0, 0, 0.14),
+                0 0 0 3px color-mix(in srgb, var(--accent-primary) 16%, transparent);
+  }
 }
 
 /* =====================================================

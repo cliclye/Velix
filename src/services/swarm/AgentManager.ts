@@ -401,12 +401,12 @@ export class AgentManager {
     });
 
     // Step 2: store the prompt — it will be sent once the CLI shows its ready indicator.
-    // A fallback timer fires after 6 s in case the ready pattern isn't detected.
+    // A fallback timer fires after 3 s in case the ready pattern isn't detected.
     this.pendingPrompts.set(agentId, prompt);
     const fallbackTimer = setTimeout(() => {
       const a = this.agents.get(agentId);
       if (a) this.deliverPendingPrompt(a);
-    }, 6000);
+    }, 3000);
     this.pendingPromptTimers.set(agentId, fallbackTimer);
 
     // Update status

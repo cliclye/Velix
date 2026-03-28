@@ -187,6 +187,10 @@ const getAssignmentState = (
     return { label: 'QUEUED', tone: 'queued' };
   }
 
+  if (agent.status === 'initializing') {
+    return { label: 'STARTING', tone: 'queued' };
+  }
+
   if (agent.status === 'completed') {
     return { label: 'DONE', tone: 'done' };
   }
@@ -669,7 +673,8 @@ export const SwarmPanel: React.FC<SwarmPanelProps> = ({
       appendLog('plan', plan.summary);
       setStatusLabel('Launching Workers');
 
-      for (const assignment of plan.assignments) {
+      // Spawn all agents in parallel for faster launch
+      await Promise.all(plan.assignments.map(async (assignment) => {
         const role = getRole(assignment.role);
         const workerTask = claudeCoordinator.buildWorkerTask(trimmedGoal, plan, assignment);
         await manager.spawnAgent(role, workerTask, {
@@ -678,7 +683,7 @@ export const SwarmPanel: React.FC<SwarmPanelProps> = ({
           ownedFiles: assignment.ownedFiles,
         });
         appendLog('dispatch', `Launched ${assignment.label}.`);
-      }
+      }));
 
       refreshAgents();
       setStatusLabel('Running');
