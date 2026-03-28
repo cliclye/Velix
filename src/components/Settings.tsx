@@ -172,7 +172,7 @@ export function Settings({ isOpen, onClose, onSave, currentConfig, theme, onThem
     const [activeTab, setActiveTab] = useState<"providers" | "cli" | "appearance" | "about">("providers");
     const [selectedProvider, setSelectedProvider] = useState<AIProvider["id"]>(currentConfig?.provider || "claude");
     const [apiKeys, setApiKeys] = useState<Record<string, string>>({});
-    const [selectedModels] = useState<Record<string, string>>({});
+    const [selectedModels, setSelectedModels] = useState<Record<string, string>>({});
     const [showKeys, setShowKeys] = useState<Record<string, boolean>>({});
     const [showSteps, setShowSteps] = useState<Record<string, boolean>>({});
 

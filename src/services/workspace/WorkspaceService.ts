@@ -153,8 +153,15 @@ export class WorkspaceService {
         const fullPath = `${projectDir}/${relativePath}`;
         try {
             const content = await readTextFile(fullPath);
-            // Also add to cache
+            // Also add to cache and update counters
             if (this.cachedContext && this.cachedProjectDir === projectDir) {
+                const prev = this.cachedContext.loadedFiles[relativePath];
+                if (!prev) {
+                    this.cachedContext.totalLoadedFiles += 1;
+                    this.cachedContext.totalLoadedSize += content.length;
+                } else {
+                    this.cachedContext.totalLoadedSize += content.length - prev.length;
+                }
                 this.cachedContext.loadedFiles[relativePath] = content;
             }
             return content;

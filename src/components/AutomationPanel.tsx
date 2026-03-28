@@ -127,8 +127,8 @@ export const AutomationPanel: React.FC<AutomationPanelProps> = ({
       }
 
       try {
-        const escaped = subtask.prompt.replace(/\\/g, '\\\\').replace(/"/g, '\\"');
-        terminalRef.write(`claude "${escaped}"\r`);
+        const escaped = subtask.prompt.replace(/'/g, "'\\''");
+        terminalRef.write(`claude '${escaped}'\r`);
         newStatus[subtask.id] = 'dispatched';
       } catch {
         newStatus[subtask.id] = 'error';
@@ -152,8 +152,8 @@ export const AutomationPanel: React.FC<AutomationPanelProps> = ({
     for (const tab of terminalTabs) {
       const ref = terminalRefs.current.get(tab.id);
       if (ref) {
-        const escaped = goal.trim().replace(/\\/g, '\\\\').replace(/"/g, '\\"');
-        ref.write(`claude "${escaped}"\r`);
+        const escaped = goal.trim().replace(/'/g, "'\\''");
+        ref.write(`claude '${escaped}'\r`);
         await new Promise(resolve => setTimeout(resolve, 200));
       }
     }

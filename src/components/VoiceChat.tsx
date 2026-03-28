@@ -33,6 +33,14 @@ export const VoiceChat: React.FC<VoiceChatProps> = ({ apiKey, onClose }) => {
     ttsService.setApiKey(apiKey);
   }, [apiKey]);
 
+  // Cleanup recording and TTS on unmount
+  useEffect(() => {
+    return () => {
+      audioRecorderRef.current?.stop().catch(() => {});
+      ttsService.stop();
+    };
+  }, []);
+
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
   }, [messages]);
@@ -216,8 +224,8 @@ export const VoiceChat: React.FC<VoiceChatProps> = ({ apiKey, onClose }) => {
           className={`mic-button ${isRecording ? 'recording' : ''}`}
           onMouseDown={startRecording}
           onMouseUp={stopRecording}
-          onTouchStart={startRecording}
-          onTouchEnd={stopRecording}
+          onTouchStart={(e) => { e.preventDefault(); startRecording(); }}
+          onTouchEnd={(e) => { e.preventDefault(); stopRecording(); }}
           disabled={isProcessing || isSpeaking}
         >
           {isRecording ? (

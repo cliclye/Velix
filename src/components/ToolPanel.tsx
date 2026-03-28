@@ -141,8 +141,7 @@ export function ToolPanel({ filePath, fileContent, projectDir, onClose }: ToolPa
         setChatInput('');
         setChatLoading(true);
 
-        const newMessages = [...chatMessages, { role: 'user' as const, content: userMessage }];
-        setChatMessages(newMessages);
+        setChatMessages(prev => [...prev, { role: 'user' as const, content: userMessage }]);
 
         try {
             const response = await aiService.chatAboutCode({
@@ -152,10 +151,10 @@ export function ToolPanel({ filePath, fileContent, projectDir, onClose }: ToolPa
                 previousAnalysis: analysis || undefined,
                 projectContext: projectDir ? `Project: ${projectDir}` : undefined,
             });
-            setChatMessages([...newMessages, { role: 'assistant', content: response }]);
+            setChatMessages(prev => [...prev, { role: 'assistant', content: response }]);
         } catch (err) {
-            setChatMessages([
-                ...newMessages,
+            setChatMessages(prev => [
+                ...prev,
                 { role: 'assistant', content: `Error: ${err instanceof Error ? err.message : 'Failed to get response'}` },
             ]);
         } finally {

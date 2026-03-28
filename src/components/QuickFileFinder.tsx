@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect, useRef, useMemo } from 'react';
 import '../styles/QuickFileFinder.css';
 
 interface QuickFileFinderProps {
@@ -52,7 +52,7 @@ const QuickFileFinder: React.FC<QuickFileFinderProps> = ({
     return 0;
   };
 
-  const filteredFiles = files
+  const filteredFiles = useMemo(() => files
     .map(file => ({
       path: file,
       score: scoreMatch(file, searchTerm)
@@ -60,7 +60,7 @@ const QuickFileFinder: React.FC<QuickFileFinderProps> = ({
     .filter(item => item.score > 0)
     .sort((a, b) => b.score - a.score)
     .map(item => item.path)
-    .slice(0, 50); // Limit to 50 results
+    .slice(0, 50), [files, searchTerm]); // Limit to 50 results
 
   useEffect(() => {
     if (isOpen && inputRef.current) {

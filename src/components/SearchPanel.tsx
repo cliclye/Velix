@@ -20,6 +20,7 @@ export const SearchPanel: React.FC<SearchPanelProps> = ({ currentDir, onResultCl
   const [results, setResults] = useState<SearchMatch[]>([]);
   const [isSearching, setIsSearching] = useState(false);
   const [searchTime, setSearchTime] = useState<number | null>(null);
+  const [hasSearched, setHasSearched] = useState(false);
   const searchRequestId = React.useRef(0);
 
   const handleSearch = async () => {
@@ -40,6 +41,7 @@ export const SearchPanel: React.FC<SearchPanelProps> = ({ currentDir, onResultCl
       if (requestId !== searchRequestId.current) return;
       setResults(matches);
       setSearchTime(Date.now() - startTime);
+      setHasSearched(true);
     } catch (err) {
       if (requestId !== searchRequestId.current) return;
       console.error('Search failed:', err);
@@ -113,7 +115,7 @@ export const SearchPanel: React.FC<SearchPanelProps> = ({ currentDir, onResultCl
       )}
 
       <div className="search-results">
-        {results.length === 0 && searchTerm && !isSearching && currentDir && (
+        {results.length === 0 && hasSearched && !isSearching && currentDir && (
           <div className="no-results">No matches found</div>
         )}
 

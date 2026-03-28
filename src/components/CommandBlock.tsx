@@ -14,9 +14,11 @@ export function CommandBlock({ command, output, timestamp, isError, onAskAI }: C
     const [copied, setCopied] = useState(false);
 
     const handleCopy = async () => {
-        await navigator.clipboard.writeText(`$ ${command}\n${output}`);
-        setCopied(true);
-        setTimeout(() => setCopied(false), 2000);
+        try {
+            await navigator.clipboard.writeText(`$ ${command}\n${output}`);
+            setCopied(true);
+            setTimeout(() => setCopied(false), 2000);
+        } catch { /* clipboard unavailable */ }
     };
 
     const formatTime = (date: Date) => {
@@ -75,10 +77,10 @@ export function CommandBlock({ command, output, timestamp, isError, onAskAI }: C
                         <button onClick={() => { handleCopy(); setShowMenu(false); }}>
                             Copy Block
                         </button>
-                        <button onClick={() => { navigator.clipboard.writeText(command); setShowMenu(false); }}>
+                        <button onClick={() => { navigator.clipboard.writeText(command).catch(() => {}); setShowMenu(false); }}>
                             Copy Command
                         </button>
-                        <button onClick={() => { navigator.clipboard.writeText(output); setShowMenu(false); }}>
+                        <button onClick={() => { navigator.clipboard.writeText(output).catch(() => {}); setShowMenu(false); }}>
                             Copy Output
                         </button>
                         {isError && onAskAI && (

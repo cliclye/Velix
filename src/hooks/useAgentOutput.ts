@@ -27,6 +27,10 @@ export function useAgentOutput(options: UseAgentOutputOptions = {}): UseAgentOut
 
   // Subscribe to agent output
   useEffect(() => {
+    // Reset output when agent changes
+    outputRef.current = [];
+    setOutput([]);
+
     const manager = orchestrator.getAgentManager();
     if (!manager) return;
 

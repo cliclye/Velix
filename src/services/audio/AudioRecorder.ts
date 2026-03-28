@@ -92,6 +92,16 @@ export class AudioRecorder {
         resolve(audioBlob);
       };
 
+      this.mediaRecorder.onerror = (event) => {
+        if (this.stream) {
+          this.stream.getTracks().forEach(track => track.stop());
+        }
+        this.mediaRecorder = null;
+        this.stream = null;
+        this.audioChunks = [];
+        reject(new Error(`Recording error: ${(event as ErrorEvent).message || 'unknown'}`));
+      };
+
       this.mediaRecorder.stop();
     });
   }

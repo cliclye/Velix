@@ -367,6 +367,7 @@ export const TerminalBlock = forwardRef<TerminalRef, TerminalBlockProps>(({
   const unlistenOutputRef = useRef<UnlistenFn | null>(null);
   const unlistenExitRef = useRef<UnlistenFn | null>(null);
   const promptKickTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const ptyRestartTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const isClaudeCodeRunningRef = useRef<boolean>(false);
 
   const [inputValue, setInputValue] = useState("");
@@ -660,7 +661,9 @@ export const TerminalBlock = forwardRef<TerminalRef, TerminalBlockProps>(({
           isClaudeCodeRunningRef.current = false;
           setHideInputCard(false);
           // Optionally restart the shell
-          setTimeout(async () => {
+          ptyRestartTimerRef.current = setTimeout(async () => {
+            ptyRestartTimerRef.current = null;
+            if (cancelled) return;
             try {
               await createPtySession(term.rows, term.cols);
             } catch (error) {
@@ -774,6 +777,14 @@ export const TerminalBlock = forwardRef<TerminalRef, TerminalBlockProps>(({
       if (promptKickTimerRef.current) {
         clearTimeout(promptKickTimerRef.current);
         promptKickTimerRef.current = null;
+      }
+      if (suggestionTimerRef.current) {
+        clearTimeout(suggestionTimerRef.current);
+        suggestionTimerRef.current = null;
+      }
+      if (ptyRestartTimerRef.current) {
+        clearTimeout(ptyRestartTimerRef.current);
+        ptyRestartTimerRef.current = null;
       }
 
       killPtySession();
@@ -1245,6 +1256,10 @@ No project is loaded. Tell the user to open a project folder so you can see thei
       if (typingInterval) {
         cancelAnimationFrame(typingInterval!);
         term.write(`\r\x1b[K`);
+      }
+      if (streamRafId !== null) {
+        cancelAnimationFrame(streamRafId);
+        streamRafId = null;
       }
 
       const isAbortError =

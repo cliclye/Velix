@@ -178,7 +178,8 @@ function App() {
         }
       }
     });
-  }, [activeTerminalId, workspaceTabs]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- only re-run on tab switch, not on every workspaceTabs mutation
+  }, [activeTerminalId]);
 
   const addWorkspaceTab = useCallback(() => {
     const newTabId = makeId("tab");
@@ -656,6 +657,7 @@ Working directory: ${currentDir || "unknown"}`;
       const responseText = response.content;
       const fileWriteRegex = /\[FILE_WRITE_START\]([\s\S]*?)\[FILE_WRITE_END\]/g;
       let writeMatch: RegExpExecArray | null;
+      let didModifyFiles = false;
       while ((writeMatch = fileWriteRegex.exec(responseText)) !== null) {
         const writeContent = writeMatch[1];
         const pathMatch = writeContent.match(/path:\s*(.+)/);
@@ -671,6 +673,7 @@ Working directory: ${currentDir || "unknown"}`;
               command: `cat > "${fullPath}" << 'VELIX_EOF'\n${fileContent}\nVELIX_EOF`,
               cwd: currentDir,
             });
+            didModifyFiles = true;
             targetTerminals.forEach((terminal) => {
               terminal.write(`\x1b[32m✓ File modified: ${fullPath}\x1b[0m\r\n`);
             });
@@ -701,6 +704,7 @@ Working directory: ${currentDir || "unknown"}`;
               command: `mkdir -p "${parentDir}" && cat > "${fullPath}" << 'VELIX_EOF'\n${fileContent}\nVELIX_EOF`,
               cwd: currentDir,
             });
+            didModifyFiles = true;
             targetTerminals.forEach((terminal) => {
               terminal.write(`\x1b[32m✓ File created: ${fullPath}\x1b[0m\r\n`);
             });
@@ -713,7 +717,7 @@ Working directory: ${currentDir || "unknown"}`;
         }
       }
 
-      if (currentDir && (fileWriteRegex.lastIndex > 0 || fileCreateRegex.lastIndex > 0)) {
+      if (currentDir && didModifyFiles) {
         workspaceService.invalidateCache();
       }
 
@@ -858,15 +862,16 @@ Working directory: ${currentDir || "unknown"}`;
   }, [activeWorkspaceTab, currentDir, loadProjectFiles, updateWorkspaceTab]);
 
   useEffect(() => {
-    if (!activeWorkspaceTab) return;
+    const tabId = activeWorkspaceTab?.id;
+    if (!tabId) return;
 
-    void refreshGitStatus(activeWorkspaceTab.id, currentDir);
+    void refreshGitStatus(tabId, currentDir);
     const interval = setInterval(() => {
-      void refreshGitStatus(activeWorkspaceTab.id, currentDir);
+      void refreshGitStatus(tabId, currentDir);
     }, 5000);
 
     return () => clearInterval(interval);
-  }, [activeWorkspaceTab, currentDir, refreshGitStatus]);
+  }, [activeWorkspaceTab?.id, currentDir, refreshGitStatus]);
 
   const handleOpenProject = useCallback(async () => {
     if (!activeWorkspaceTab) return;

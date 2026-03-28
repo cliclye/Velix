@@ -235,6 +235,7 @@ export function useSwarm(options: UseSwarmOptions): UseSwarmReturn {
   const abortTask = useCallback(async () => {
     try {
       await orchestratorRef.current.abortTask();
+      setPendingApprovals([]);
       setError(null);
     } catch (err) {
       setError(`Failed to abort: ${err}`);
@@ -255,21 +256,27 @@ export function useSwarm(options: UseSwarmOptions): UseSwarmReturn {
 
   // Approve action
   const approveAction = useCallback(async (approvalId: string) => {
-    const rules = orchestratorRef.current.getAutomationRules();
-    const manager = orchestratorRef.current.getAgentManager();
-    if (manager) {
+    try {
+      const rules = orchestratorRef.current.getAutomationRules();
+      const manager = orchestratorRef.current.getAgentManager();
+      if (!manager) { setError('Agent manager not available'); return; }
       await rules.resolveApproval(approvalId, true, manager);
       setPendingApprovals((prev) => prev.filter((a) => a.id !== approvalId));
+    } catch (err) {
+      setError(`Failed to approve: ${err}`);
     }
   }, []);
 
   // Deny action
   const denyAction = useCallback(async (approvalId: string) => {
-    const rules = orchestratorRef.current.getAutomationRules();
-    const manager = orchestratorRef.current.getAgentManager();
-    if (manager) {
+    try {
+      const rules = orchestratorRef.current.getAutomationRules();
+      const manager = orchestratorRef.current.getAgentManager();
+      if (!manager) { setError('Agent manager not available'); return; }
       await rules.resolveApproval(approvalId, false, manager);
       setPendingApprovals((prev) => prev.filter((a) => a.id !== approvalId));
+    } catch (err) {
+      setError(`Failed to deny: ${err}`);
     }
   }, []);
 
@@ -285,10 +292,13 @@ export function useSwarm(options: UseSwarmOptions): UseSwarmReturn {
 
   // Terminate agent
   const terminateAgent = useCallback(async (agentId: string) => {
-    const manager = orchestratorRef.current.getAgentManager();
-    if (manager) {
+    try {
+      const manager = orchestratorRef.current.getAgentManager();
+      if (!manager) { setError('Agent manager not available'); return; }
       await manager.terminateAgent(agentId, 'User terminated');
       setAgents(manager.getAllAgents());
+    } catch (err) {
+      setError(`Failed to terminate agent: ${err}`);
     }
   }, []);
 

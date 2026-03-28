@@ -17,6 +17,30 @@ export const SWARM_SPECIALIST_ROLE_ORDER: AgentRoleType[] = [
   'reviewer',
 ];
 
+export const MAX_MODE_DIRECTIVE = `
+--- MAX MODE ACTIVE ---
+You are operating in MAX MODE. This means maximum effort, maximum depth, production-level quality.
+
+BEHAVIOR:
+- Do NOT take shortcuts or produce partial implementations.
+- Do NOT assume anything without validating it.
+- Do NOT stop at the first working solution — evaluate alternatives and pick the best.
+
+STANDARDS:
+- Build fully functional, end-to-end logic with no placeholders or hacks.
+- Handle ALL edge cases and failure scenarios.
+- Write clean, modular, maintainable, and scalable code.
+- Self-review your work. Identify weaknesses and fix them before finishing.
+
+QUALITY BAR:
+- The result must work reliably and be production-ready.
+- The design must be clean and extensible.
+- Only consider your task complete when ALL requirements are met with zero known gaps.
+
+Operate like a senior engineer building a critical system.
+--- END MAX MODE ---
+`.trim();
+
 const DEFAULT_ROLE_DEPENDENCIES: Partial<Record<AgentRoleType, AgentRoleType[]>> = {
   architect: ['planner'],
   frontend: ['architect', 'scout'],
@@ -252,10 +276,15 @@ const createFallbackAssignment = (
   const roleDef = getRole(slot.role);
   const dependencyLabels = fallbackDependencyLabels(slot, requestedSlots);
 
+  const builderSlots = requestedSlots.filter((s) => s.role === 'builder');
+  const builderIndex = builderSlots.findIndex((s) => s.assignmentId === slot.assignmentId);
+
   const taskByRole: Record<'scout' | 'builder' | 'reviewer', string> = {
-    scout: `Map the code paths most relevant to "${goal}", identify risks, and recommend clean ownership boundaries for the builders.`,
-    builder: `Own the ${slot.label.toLowerCase()} implementation slice for "${goal}" and ship concrete progress inside the assigned boundary.`,
-    reviewer: `Review completed builder slices for "${goal}", flag regressions or risks, and act as the release gate before the swarm calls the work done.`,
+    scout: `Investigate the codebase for: "${goal}". Map every file, module, and pattern relevant to this goal. Identify risks, hidden dependencies, and constraints. Recommend clear file-ownership boundaries so ${builderSlots.length} builder(s) can work without collisions. Be specific — name exact files and directories.`,
+    builder: builderSlots.length > 1
+      ? `You are builder ${builderIndex + 1} of ${builderSlots.length} for the goal: "${goal}". Implement your assigned slice end-to-end inside your owned files. Do not touch files outside your ownership boundary. Validate your work before reporting completion.`
+      : `Implement the full goal: "${goal}". Ship working, validated code. Report touched files and any blockers in your final summary.`,
+    reviewer: `Review all completed builder work for the goal: "${goal}". Check for correctness, regressions, style consistency, and security. Provide a clear go/no-go verdict with actionable findings tied to specific files.`,
   };
 
   const deliverablesByRole: Record<'scout' | 'builder' | 'reviewer', string[]> = {
@@ -439,7 +468,7 @@ export class ClaudeCoordinator {
     }
   }
 
-  async createLaunchPlan(goal: string, workspacePath: string, roles: AgentRoleType[], config?: CoordinatorConfig): Promise<CoordinatorPlan> {
+  async createLaunchPlan(goal: string, workspacePath: string, roles: AgentRoleType[], config?: CoordinatorConfig, maxMode?: boolean): Promise<CoordinatorPlan> {
     const requestedSlots = buildRequestedAssignmentSlots(roles);
     const roleCatalog = buildRoleCatalog(requestedSlots);
 
@@ -453,19 +482,44 @@ export class ClaudeCoordinator {
       // proceed without file list
     }
 
+    const builderCount = requestedSlots.filter((s) => s.role === 'builder').length;
+    const scoutCount = requestedSlots.filter((s) => s.role === 'scout').length;
+
     const prompt = [
-      `You are the coordinator for a multi-agent coding swarm. Goal: ${goal}`,
+      `You are the coordinator for a multi-agent coding swarm.`,
+      `User goal: ${goal}`,
       '',
+      '## Your job',
+      'Break the user goal into concrete, non-overlapping sub-tasks and assign each to an agent slot.',
+      '',
+      '## Task splitting rules',
+      scoutCount > 0
+        ? [
+            `- SCOUT task: Write a detailed, goal-specific investigation prompt. The scout must know exactly what parts of the codebase to map and what risks to look for based on the goal.`,
+            `  Example — if the goal mentions "redesign UI and fix sorting bug", the scout should map BOTH the UI component tree AND the sorting algorithm, not just do a generic scan.`,
+          ].join('\n')
+        : '',
+      builderCount > 1
+        ? [
+            `- BUILDER tasks (${builderCount} builders): Intelligently decompose the goal into ${builderCount} distinct sub-tasks. Each builder gets ONE focused sub-task — not a fraction of the same task.`,
+            `  Example — "redesign website and fix algorithm bug" with 2 builders → Builder-1 gets the full redesign, Builder-2 gets the full algorithm fix.`,
+            `  Example — "add auth system" with 3 builders → Builder-1 gets login/signup UI, Builder-2 gets auth API + middleware, Builder-3 gets session management + token refresh.`,
+            `  Each builder's "task" field must be a detailed, actionable prompt (3-5 sentences) explaining exactly what to build, not a vague one-liner.`,
+          ].join('\n')
+        : `- BUILDER task: Write a detailed, actionable prompt (3-5 sentences) for the builder covering the full goal.`,
+      '- REVIEWER task: Review all completed builder work for correctness, regressions, and quality.',
+      '- Every assignment must have a specific "task" field — never leave it generic.',
+      '- Assign "ownedFiles" to each builder so they don\'t collide. Use the file list below to pick real paths.',
+      '',
+      '## Output format',
       'Return ONLY compact JSON:',
-      '{"summary":"…","strategy":"…","coordinatorBrief":"…","assignments":[{"assignmentId":"…","label":"…","role":"…","task":"…","ownedFiles":["…"],"deliverables":["…"],"dependencies":["…"],"successCriteria":["…"]}]}',
+      '{"summary":"...","strategy":"...","coordinatorBrief":"...","assignments":[{"assignmentId":"...","label":"...","role":"...","task":"...","ownedFiles":["..."],"deliverables":["..."],"dependencies":["..."],"successCriteria":["..."]}]}',
       '',
-      `Rules (${requestedSlots.length} assignments, one per slot):`,
-      '- Use provided assignmentId/label exactly. No overlapping file ownership.',
-      '- Scout: discovery first. Builders: narrow implementation slice each. Reviewer: quality gate only.',
-      '',
-      `Slots: ${JSON.stringify(roleCatalog)}`,
+      `Slots (${requestedSlots.length} total — use these assignmentId/label values exactly):`,
+      JSON.stringify(roleCatalog),
       `Workspace: ${workspacePath}`,
-      fileList ? `Files:\n${fileList}` : '',
+      fileList ? `\nFiles in project:\n${fileList}` : '',
+      maxMode ? `\n## MAX MODE ACTIVE\nThe swarm is in MAX MODE. Write extremely detailed, thorough task prompts for each agent. Each builder task must be 5-8 sentences with specific implementation details, edge cases to handle, and quality requirements. Scout tasks must cover every relevant area exhaustively. Reviewer tasks must demand production-level quality with zero tolerance for shortcuts.` : '',
     ].filter(Boolean).join('\n');
 
     const resolvedConfig = config ?? {
@@ -493,31 +547,38 @@ export class ClaudeCoordinator {
       role: agent.role.type,
     }));
 
-    // Compact snapshot for the prompt — only what the coordinator needs to assess state.
-    const promptSnapshot = agents.map((agent) => ({
-      id: agent.assignmentId || sanitizeId(agent.label || agent.role.name || agent.id),
-      label: agent.label || agent.role.name,
-      role: agent.role.type,
-      status: agent.status,
-      // Last 8 lines, max 600 chars — enough to detect stalls or completion
-      tail: agent.outputBuffer.slice(-8).join('\n').slice(-600),
-    }));
-
-    // Strip bulky fields from plan; only send assignment IDs, labels, roles
-    const planSummary = {
-      summary: plan.summary,
-      assignments: plan.assignments.map((a) => ({ id: a.id, label: a.label, role: a.role })),
-    };
+    // Compact snapshot for the prompt — what the coordinator needs to assess state.
+    const promptSnapshot = agents.map((agent) => {
+      const assignment = plan.assignments.find((a) => a.id === agent.assignmentId);
+      return {
+        id: agent.assignmentId || sanitizeId(agent.label || agent.role.name || agent.id),
+        label: agent.label || agent.role.name,
+        role: agent.role.type,
+        status: agent.status,
+        task: assignment?.task || agent.assignedTask || '',
+        ownedFiles: assignment?.ownedFiles || [],
+        // Last 15 lines, max 1200 chars — enough to understand progress and detect issues
+        tail: agent.outputBuffer.slice(-15).join('\n').slice(-1200),
+      };
+    });
 
     const prompt = [
-      `Coordinator sync. Goal: ${goal}`,
-      `Plan: ${JSON.stringify(planSummary)}`,
-      `Agents: ${JSON.stringify(promptSnapshot)}`,
+      `You are the coordinator managing a coding swarm. Goal: ${goal}`,
+      `Strategy: ${plan.strategy}`,
+      '',
+      '## Current agent status',
+      JSON.stringify(promptSnapshot, null, 1),
+      '',
+      '## Your job',
+      '- Assess whether each agent is making progress on their assigned task.',
+      '- If an agent is stuck, drifting off-task, or working outside their owned files, send a corrective action.',
+      '- If an agent finished and another depends on it, send a nudge with relevant context.',
+      '- If everything looks good, return no actions.',
       '',
       'Return ONLY compact JSON:',
-      '{"summary":"…","overallStatus":"on_track|needs_attention|blocked","nextMilestone":"…","actions":[{"assignmentId":"…","message":"…"}]}',
+      '{"summary":"...","overallStatus":"on_track|needs_attention|blocked","nextMilestone":"...","actions":[{"assignmentId":"...","message":"..."}]}',
       '',
-      'Actions optional. Only send when redirection/handoff is needed. Max 2 sentences per action.',
+      'Actions optional. Only send when redirection/handoff is needed. Keep messages actionable (2-3 sentences max).',
     ].join('\n');
 
     const resolvedConfig = config ?? {
@@ -552,7 +613,13 @@ export class ClaudeCoordinator {
     };
   }
 
-  buildWorkerTask(goal: string, plan: CoordinatorPlan, assignment: CoordinatorAssignment): string {
+  buildWorkerTask(
+    goal: string,
+    plan: CoordinatorPlan,
+    assignment: CoordinatorAssignment,
+    dependencyOutputs?: Map<string, string>,
+    maxMode?: boolean,
+  ): string {
     const role = getRole(assignment.role);
     const dependencyText = assignment.dependencies.length > 0
       ? assignment.dependencies.join(', ')
@@ -561,7 +628,7 @@ export class ClaudeCoordinator {
       ? assignment.ownedFiles.map((ownedFile) => `- ${ownedFile}`)
       : ['- Coordinator did not provide exact paths. Establish boundaries before making broad edits.'];
 
-    return [
+    const lines = [
       `You are ${assignment.label}, the ${role.name} in a coordinated coding swarm.`,
       `Overall goal: ${goal}`,
       '',
@@ -578,6 +645,22 @@ export class ClaudeCoordinator {
       ...assignment.deliverables.map((deliverable) => `- ${deliverable}`),
       '',
       `Dependencies: ${dependencyText}`,
+    ];
+
+    // Inject findings from completed dependency agents
+    if (dependencyOutputs && dependencyOutputs.size > 0) {
+      lines.push('');
+      lines.push('--- Dependency findings (from completed agents) ---');
+      for (const [depLabel, depOutput] of dependencyOutputs) {
+        // Cap each dependency's output to avoid blowing up the prompt
+        const trimmed = depOutput.length > 3000 ? depOutput.slice(-3000) : depOutput;
+        lines.push(`\n## ${depLabel} output:\n${trimmed}`);
+      }
+      lines.push('--- End dependency findings ---');
+    }
+
+    lines.push(
+      '',
       'Success criteria:',
       ...assignment.successCriteria.map((criterion) => `- ${criterion}`),
       '',
@@ -587,7 +670,126 @@ export class ClaudeCoordinator {
       '- If you need files outside your lane, stop and report the ownership gap instead of guessing.',
       '- Keep status updates short and operational. Mention touched files, validations, and blockers in your final summary.',
       '- Prioritize shipping code over conversation. Escalate quickly if blocked.',
+    );
+
+    if (maxMode) {
+      lines.push('', MAX_MODE_DIRECTIVE);
+    }
+
+    return lines.join('\n');
+  }
+
+  /**
+   * Evaluate reviewer output and determine APPROVED or REVISE.
+   * Returns the verdict and revision instructions if REVISE.
+   */
+  async evaluateReview(
+    goal: string,
+    reviewerOutputs: Map<string, string>,
+    builderOutputs: Map<string, string>,
+    config?: CoordinatorConfig,
+  ): Promise<{ verdict: 'APPROVED' | 'REVISE'; summary: string; revisionInstructions: string }> {
+    if (reviewerOutputs.size === 0) {
+      return { verdict: 'REVISE', summary: 'Reviewers produced no output — requesting revision.', revisionInstructions: 'Reviewers did not produce output. Re-verify your work and ensure all requirements are met.' };
+    }
+
+    const reviewTexts = Array.from(reviewerOutputs.entries())
+      .map(([label, output]) => {
+        const trimmed = output.length > 3000 ? output.slice(-3000) : output;
+        return `### ${label}:\n${trimmed}`;
+      })
+      .join('\n\n');
+
+    const prompt = [
+      'You are the Coordinator evaluating reviewer feedback for a coding swarm.',
+      `Goal: ${goal}`,
+      '',
+      '## Reviewer outputs',
+      reviewTexts,
+      '',
+      '## Your job',
+      'Analyze the reviewer outputs and determine if the work should be APPROVED or sent back for REVISION.',
+      '',
+      'Look for the ---REVIEW-VERDICT--- block in each reviewer output.',
+      '- If all reviewers say APPROVED and there are no critical issues: return APPROVED',
+      '- If any reviewer says REVISE or there are unresolved critical issues: return REVISE',
+      '',
+      'Return ONLY compact JSON:',
+      '{"verdict":"APPROVED|REVISE","summary":"...","revisionInstructions":"..."}',
+      '',
+      'revisionInstructions: If REVISE, compile all reviewer feedback into clear, actionable instructions for builders. If APPROVED, leave empty.',
     ].join('\n');
+
+    const resolvedConfig = config ?? {
+      provider: 'claude' as ProviderID,
+      model: PROVIDERS.find((p) => p.id === 'claude')?.models[0] ?? 'claude-sonnet-4-6',
+      apiKey: await this.getCoordinatorApiKey('claude'),
+    };
+
+    const raw = await this.callCoordinator(prompt, resolvedConfig);
+    const parsed = parseObjectResponse<{ verdict?: string; summary?: string; revisionInstructions?: string }>(raw);
+
+    const verdict = parsed?.verdict?.toUpperCase() === 'APPROVED' ? 'APPROVED' : 'REVISE';
+
+    return {
+      verdict,
+      summary: parsed?.summary?.trim() || (verdict === 'APPROVED' ? 'All work approved.' : 'Revisions needed.'),
+      revisionInstructions: parsed?.revisionInstructions?.trim() || '',
+    };
+  }
+
+  /**
+   * Build a revision task for a builder based on reviewer feedback.
+   */
+  buildRevisionTask(
+    goal: string,
+    plan: CoordinatorPlan,
+    assignment: CoordinatorAssignment,
+    originalBuilderOutput: string,
+    revisionInstructions: string,
+    iterationNumber: number,
+    maxMode?: boolean,
+  ): string {
+    const role = getRole(assignment.role);
+    const ownershipLines = assignment.ownedFiles.length > 0
+      ? assignment.ownedFiles.map((ownedFile) => `- ${ownedFile}`)
+      : ['- Same files as your previous iteration.'];
+
+    const prevOutput = originalBuilderOutput.length > 2000
+      ? originalBuilderOutput.slice(-2000)
+      : originalBuilderOutput;
+
+    const lines = [
+      `You are ${assignment.label}, the ${role.name} in a coordinated coding swarm.`,
+      `Overall goal: ${goal}`,
+      '',
+      `## REVISION ROUND ${iterationNumber}`,
+      'The Reviewer evaluated your previous work and found issues that must be fixed.',
+      '',
+      '## Reviewer feedback and required changes:',
+      revisionInstructions,
+      '',
+      '## Your previous work summary (for reference):',
+      prevOutput,
+      '',
+      `Your assigned task (unchanged): ${assignment.task}`,
+      '',
+      'Owned files or slices:',
+      ...ownershipLines,
+      '',
+      'INSTRUCTIONS:',
+      '- Fix every issue listed in the reviewer feedback above.',
+      '- Do not skip any required change.',
+      '- Stay within your file ownership boundary.',
+      '- Validate your fixes before reporting completion.',
+      '- End with the ---BUILDER-REPORT--- structured block.',
+    ];
+
+    if (maxMode) {
+      lines.push('', MAX_MODE_DIRECTIVE);
+    }
+
+    return lines.join('\n');
   }
 }
 
