@@ -428,6 +428,8 @@ export const TerminalBlock = forwardRef<TerminalRef, TerminalBlockProps>(({
   const createPtySession = useCallback(async (rows: number, cols: number) => {
     const sessionId = generateSessionId();
     sessionIdRef.current = sessionId;
+    // Reset tracked dims so the first onResize after session creation always sends
+    lastPtyDimsRef.current = { rows: 0, cols: 0 };
 
     if (promptKickTimerRef.current) {
       clearTimeout(promptKickTimerRef.current);
@@ -481,9 +483,16 @@ export const TerminalBlock = forwardRef<TerminalRef, TerminalBlockProps>(({
     }
   }));
 
-  // Resize PTY
+  // Track last PTY dimensions to avoid redundant resize calls
+  const lastPtyDimsRef = useRef<{ rows: number; cols: number }>({ rows: 0, cols: 0 });
+
+  // Resize PTY — only sends when dimensions actually change
   const resizePty = useCallback(async (rows: number, cols: number) => {
     if (!sessionIdRef.current) return;
+    if (rows <= 0 || cols <= 0) return;
+    if (lastPtyDimsRef.current.rows === rows && lastPtyDimsRef.current.cols === cols) return;
+
+    lastPtyDimsRef.current = { rows, cols };
 
     try {
       await invoke("pty_resize", {
@@ -686,21 +695,33 @@ export const TerminalBlock = forwardRef<TerminalRef, TerminalBlockProps>(({
       resizePty(rows, cols);
     });
 
-    // Debounced fit helper — avoids calling fit() on every resize frame
+    // Debounced fit helper — waits for resize/transitions to settle before
+    // calling fit(). Uses a longer debounce (150ms) so intermediate sizes
+    // during CSS transitions don't send SIGWINCH storms to running CLIs.
+    // A trailing fit at 400ms catches cases where the transition easing
+    // slightly overshoots or the container takes longer to settle.
     let resizeTimer: ReturnType<typeof setTimeout> | null = null;
+    let trailingTimer: ReturnType<typeof setTimeout> | null = null;
     const debouncedFit = () => {
       if (resizeTimer) clearTimeout(resizeTimer);
+      if (trailingTimer) clearTimeout(trailingTimer);
       resizeTimer = setTimeout(() => {
         if (fitAddonRef.current) fitAddonRef.current.fit();
         resizeTimer = null;
-      }, 60);
+        // Schedule a trailing fit to catch post-transition layout shifts
+        trailingTimer = setTimeout(() => {
+          if (fitAddonRef.current) fitAddonRef.current.fit();
+          trailingTimer = null;
+        }, 300);
+      }, 150);
     };
 
     // Handle window resize
     const handleWindowResize = () => debouncedFit();
     window.addEventListener("resize", handleWindowResize);
 
-    // Observe container size changes
+    // Observe container size changes (fires during CSS transitions, panel
+    // open/close, sidebar collapse, editor drag-resize, etc.)
     const resizeObserver = new ResizeObserver(() => debouncedFit());
     resizeObserver.observe(containerRef.current);
 
@@ -712,6 +733,7 @@ export const TerminalBlock = forwardRef<TerminalRef, TerminalBlockProps>(({
       window.removeEventListener("resize", handleWindowResize);
       resizeObserver.disconnect();
       if (resizeTimer) clearTimeout(resizeTimer);
+      if (trailingTimer) clearTimeout(trailingTimer);
 
       if (unlistenOutputRef.current) {
         unlistenOutputRef.current();
