@@ -21,6 +21,7 @@ import { aiService } from "../services/ai/AIService";
 import { ChatMessage, PROVIDERS } from "../services/ai/types";
 import { workspaceService, WorkspaceContext } from "../services/workspace";
 import { AIChat, AIChatMessage } from "./AIChat";
+import { getWorkerCLIOptions } from "../services/swarm";
 
 // Web Speech API type declarations
 interface SpeechRecognitionEvent extends Event {
@@ -510,61 +511,65 @@ export const TerminalBlock = forwardRef<TerminalRef, TerminalBlockProps>(({
     sessionIdRef.current = "";
   }, []);
 
+  const DARK_TERMINAL_THEME = useMemo(() => ({
+    background: "#0f1012",
+    foreground: "#f3f4f6",
+    cursor: "#f2f2f3",
+    cursorAccent: "#0f1012",
+    selectionBackground: "rgba(255, 255, 255, 0.14)",
+    selectionForeground: "#ffffff",
+    black: "#17181b",
+    red: "#8e919a",
+    green: "#cfd1d7",
+    yellow: "#b8bac1",
+    blue: "#f2f2f3",
+    magenta: "#d6d7dc",
+    cyan: "#b8bac1",
+    white: "#cfd1d7",
+    brightBlack: "#676a73",
+    brightRed: "#d6d7dc",
+    brightGreen: "#ffffff",
+    brightYellow: "#e5e7eb",
+    brightBlue: "#ffffff",
+    brightMagenta: "#e5e7eb",
+    brightCyan: "#d6d7dc",
+    brightWhite: "#ffffff",
+  }), []);
+
+  const LIGHT_TERMINAL_THEME = useMemo(() => ({
+    background: "#f5f5f7",
+    foreground: "#101114",
+    cursor: "#111111",
+    cursorAccent: "#f5f5f7",
+    selectionBackground: "rgba(17, 17, 17, 0.14)",
+    selectionForeground: "#050506",
+    black: "#101114",
+    red: "#3a3c42",
+    green: "#2d2e34",
+    yellow: "#4d4f58",
+    blue: "#111111",
+    magenta: "#696b74",
+    cyan: "#545660",
+    white: "#6c6f78",
+    brightBlack: "#91939c",
+    brightRed: "#545660",
+    brightGreen: "#111111",
+    brightYellow: "#2d2e34",
+    brightBlue: "#050506",
+    brightMagenta: "#3a3c42",
+    brightCyan: "#2d2e34",
+    brightWhite: "#050506",
+  }), []);
+
+  useEffect(() => {
+    if (termRef.current) {
+      termRef.current.options.theme = theme === "light" ? LIGHT_TERMINAL_THEME : DARK_TERMINAL_THEME;
+    }
+  }, [theme, DARK_TERMINAL_THEME, LIGHT_TERMINAL_THEME]);
+
   useEffect(() => {
     if (!containerRef.current) return;
 
-    // Theme configuration — neutral grayscale palette aligned to the app shell
-    const darkTheme = {
-      background: "#0f1012",
-      foreground: "#f3f4f6",
-      cursor: "#f2f2f3",
-      cursorAccent: "#0f1012",
-      selectionBackground: "rgba(255, 255, 255, 0.14)",
-      selectionForeground: "#ffffff",
-      black: "#17181b",
-      red: "#8e919a",
-      green: "#cfd1d7",
-      yellow: "#b8bac1",
-      blue: "#f2f2f3",
-      magenta: "#d6d7dc",
-      cyan: "#b8bac1",
-      white: "#cfd1d7",
-      brightBlack: "#676a73",
-      brightRed: "#d6d7dc",
-      brightGreen: "#ffffff",
-      brightYellow: "#e5e7eb",
-      brightBlue: "#ffffff",
-      brightMagenta: "#e5e7eb",
-      brightCyan: "#d6d7dc",
-      brightWhite: "#ffffff",
-    };
-
-    const lightTheme = {
-      background: "#f5f5f7",
-      foreground: "#101114",
-      cursor: "#111111",
-      cursorAccent: "#f5f5f7",
-      selectionBackground: "rgba(17, 17, 17, 0.14)",
-      selectionForeground: "#050506",
-      black: "#101114",
-      red: "#3a3c42",
-      green: "#2d2e34",
-      yellow: "#4d4f58",
-      blue: "#111111",
-      magenta: "#696b74",
-      cyan: "#545660",
-      white: "#6c6f78",
-      brightBlack: "#91939c",
-      brightRed: "#545660",
-      brightGreen: "#111111",
-      brightYellow: "#2d2e34",
-      brightBlue: "#050506",
-      brightMagenta: "#3a3c42",
-      brightCyan: "#2d2e34",
-      brightWhite: "#050506",
-    };
-
-    // Create terminal instance
     const term = new Terminal({
       cursorBlink: true,
       cursorStyle: "bar",
@@ -574,7 +579,7 @@ export const TerminalBlock = forwardRef<TerminalRef, TerminalBlockProps>(({
       lineHeight: 1.6,
       allowProposedApi: true,
       scrollback: 10000,
-      theme: theme === "light" ? lightTheme : darkTheme,
+      theme: theme === "light" ? LIGHT_TERMINAL_THEME : DARK_TERMINAL_THEME,
     });
 
     // Create and load fit addon
@@ -591,10 +596,13 @@ export const TerminalBlock = forwardRef<TerminalRef, TerminalBlockProps>(({
       fitAddon.fit();
     }, 0);
 
-    // Setup event listeners and PTY session
+    // Setup event listeners and PTY session. `setup` is async; if `cwd` changes
+    // (e.g. user opens a project folder) before awaits finish, a stale run must
+    // not create a PTY in the old directory or overwrite the new effect's listeners.
+    let cancelled = false;
+
     const setup = async () => {
-      // Listen for PTY output
-      unlistenOutputRef.current = await listen<PtyOutput>("pty-output", (event) => {
+      const unlistenOut = await listen<PtyOutput>("pty-output", (event) => {
         if (event.payload.session_id === sessionIdRef.current) {
           const data = event.payload.data;
           term.write(data);
@@ -622,8 +630,13 @@ export const TerminalBlock = forwardRef<TerminalRef, TerminalBlockProps>(({
         }
       });
 
-      // Listen for PTY exit
-      unlistenExitRef.current = await listen<PtyExit>("pty-exit", (event) => {
+      if (cancelled) {
+        unlistenOut();
+        return;
+      }
+      unlistenOutputRef.current = unlistenOut;
+
+      const unlistenEx = await listen<PtyExit>("pty-exit", (event) => {
         if (event.payload.session_id === sessionIdRef.current) {
           if (promptKickTimerRef.current) {
             clearTimeout(promptKickTimerRef.current);
@@ -644,15 +657,24 @@ export const TerminalBlock = forwardRef<TerminalRef, TerminalBlockProps>(({
         }
       });
 
+      if (cancelled) {
+        unlistenOut();
+        unlistenEx();
+        return;
+      }
+      unlistenExitRef.current = unlistenEx;
+
       // Create PTY session
       try {
         await createPtySession(term.rows, term.cols);
       } catch (error) {
-        term.writeln(`\x1b[31mFailed to create terminal session: ${error}\x1b[0m`);
+        if (!cancelled) {
+          term.writeln(`\x1b[31mFailed to create terminal session: ${error}\x1b[0m`);
+        }
       }
     };
 
-    setup();
+    void setup();
 
     // Handle user input - send to PTY
     const onDataDisposable = term.onData((data) => {
@@ -684,6 +706,7 @@ export const TerminalBlock = forwardRef<TerminalRef, TerminalBlockProps>(({
 
     // Cleanup
     return () => {
+      cancelled = true;
       onDataDisposable.dispose();
       onResizeDisposable.dispose();
       window.removeEventListener("resize", handleWindowResize);
@@ -692,9 +715,11 @@ export const TerminalBlock = forwardRef<TerminalRef, TerminalBlockProps>(({
 
       if (unlistenOutputRef.current) {
         unlistenOutputRef.current();
+        unlistenOutputRef.current = null;
       }
       if (unlistenExitRef.current) {
         unlistenExitRef.current();
+        unlistenExitRef.current = null;
       }
 
       if (promptKickTimerRef.current) {
@@ -707,7 +732,8 @@ export const TerminalBlock = forwardRef<TerminalRef, TerminalBlockProps>(({
       termRef.current = null;
       fitAddonRef.current = null;
     };
-  }, [createPtySession, writeToPty, resizePty, killPtySession, theme]);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [createPtySession, writeToPty, resizePty, killPtySession, cwd]);
 
   // Read npm scripts from workspace context or project file contents
   const npmScripts = useMemo((): string[] => {
@@ -1578,7 +1604,22 @@ No project is loaded. Tell the user to open a project folder so you can see thei
             {cwd?.split('/').pop() || 'terminal'}
           </span>
         </div>
-        <span className="simple-header-badge">sh</span>
+        <div className="cli-launch-bar">
+          {getWorkerCLIOptions().map(option => (
+            <button
+              key={option.id}
+              className="cli-launch-btn"
+              title={`Launch ${option.name}`}
+              onClick={() => {
+                writeToPty(`${option.command}\r`);
+                termRef.current?.focus();
+              }}
+            >
+              {option.name}
+            </button>
+          ))}
+        </div>
+        <span className="simple-header-badge">zsh</span>
       </div>
 
       {/* Terminal output area */}

@@ -110,10 +110,18 @@ export class SupervisorValidator {
       const startTime = Date.now();
 
       try {
-        const result = await invoke<ShellResult>('execute_shell_command', {
+        const shellPromise = invoke<ShellResult>('execute_shell_command', {
           command: check.command,
           cwd,
         });
+
+        const timeoutMs = check.timeout || 120000;
+        const result = await Promise.race([
+          shellPromise,
+          new Promise<never>((_resolve, reject) =>
+            setTimeout(() => reject(new Error(`Validation '${check.type}' timed out after ${timeoutMs}ms`)), timeoutMs),
+          ),
+        ]);
 
         const errors = this.parseErrors(result.stdout + result.stderr, check.type);
 

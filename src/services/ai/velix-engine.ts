@@ -10,7 +10,7 @@ import { invoke } from '../../platform/native';
 /** Velix model ID → actual provider model ID overrides (only where they differ) */
 const MODEL_ID_MAP: Record<string, string> = {
   // Anthropic — map to full dated IDs
-  'claude-opus-4-5': 'claude-opus-4-5-20251101',
+  'claude-opus-4-6': 'claude-opus-4-6-20250527',
   'claude-haiku-4-5': 'claude-haiku-4-5-20251001',
   // Google models
   'gemini-2.5-pro': 'gemini-2.5-pro-preview-06-05',

@@ -87,15 +87,47 @@ export function useSwarm(options: UseSwarmOptions): UseSwarmReturn {
       setError(null);
     } catch (err) {
       setError(`Failed to initialize: ${err}`);
+      setIsInitialized(false);
     }
   }, [workspacePath]);
 
-  // Auto-initialize on mount
+  // Auto-initialize when workspace is available. Avoid `!isInitialized` in deps — a failed init
+  // would otherwise retrigger this effect every render and spam initialize().
   useEffect(() => {
-    if (autoInitialize && workspacePath && !isInitialized) {
-      initialize();
+    if (!autoInitialize || !workspacePath) {
+      setIsInitialized(false);
+      return;
     }
-  }, [autoInitialize, workspacePath, isInitialized, initialize]);
+
+    let cancelled = false;
+    setIsInitialized(false);
+
+    void (async () => {
+      try {
+        await orchestratorRef.current.initialize({
+          workspacePath,
+          maxAgents: 8,
+          maxRuntime: 600000,
+          maxRetries: 3,
+          dryRunMode: false,
+          safeMode: false,
+        });
+        if (!cancelled) {
+          setIsInitialized(true);
+          setError(null);
+        }
+      } catch (err) {
+        if (!cancelled) {
+          setError(`Failed to initialize: ${err}`);
+          setIsInitialized(false);
+        }
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [autoInitialize, workspacePath]);
 
   // Subscribe to state changes
   useEffect(() => {

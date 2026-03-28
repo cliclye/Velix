@@ -43,6 +43,8 @@ export class OrchestratorCore {
   private retryCount: Map<string, number> = new Map();
   private taskStartTime: number = 0;
   private stateChangeCallbacks: Array<(state: OrchestratorState, task: SwarmTask | null) => void> = [];
+  /** Unsubscribe from `subscribeToAgentEvents` when re-initializing (avoids duplicate handlers). */
+  private unsubscribeAgentEvents: (() => void) | null = null;
 
   constructor(config: Partial<OrchestratorConfig> = {}) {
     this.config = { ...DEFAULT_CONFIG, ...config };
@@ -77,6 +79,14 @@ export class OrchestratorCore {
       throw new Error('Workspace path is required');
     }
 
+    // Tear down previous listeners / PTY hooks so re-init (e.g. new workspace) does not stack.
+    this.unsubscribeAgentEvents?.();
+    this.unsubscribeAgentEvents = null;
+    if (this.agentManager) {
+      await this.agentManager.cleanup();
+      this.agentManager = null;
+    }
+
     // Create agent manager
     this.agentManager = new AgentManager(this.eventEmitter, this.config.workspacePath);
     await this.agentManager.initialize();
@@ -87,9 +97,9 @@ export class OrchestratorCore {
     );
 
     // Listen for agent events to handle automation
-    this.eventEmitter.subscribeToAgentEvents((event) => {
+    this.unsubscribeAgentEvents = this.eventEmitter.subscribeToAgentEvents((event) => {
       if (event.type === 'prompt_detected') {
-        this.handlePromptDetected(event.agentId, event.match);
+        void this.handlePromptDetected(event.agentId, event.match);
       }
     });
 
@@ -251,6 +261,9 @@ export class OrchestratorCore {
         break;
       case 'fixing':
         await this.doFixing();
+        break;
+      case 'paused':
+        // Interval started in doRunning clears when state !== 'running'; nothing else to do here.
         break;
       case 'completed':
         await this.doCompleted();

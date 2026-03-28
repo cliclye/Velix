@@ -1,5 +1,7 @@
-import { useState, useEffect } from "react";
+import { useState, useEffect, useCallback } from "react";
 import { invoke } from "../platform/native";
+import { getWorkerCLIOptions, loadCustomCLIOptions, saveCustomCLIOptions } from "../services/swarm";
+import type { WorkerCLIOption } from "../services/swarm";
 import velixLogo from "../../velixlogo.png";
 import "./Settings.css";
 
@@ -167,29 +169,57 @@ export interface AIConfig {
 }
 
 export function Settings({ isOpen, onClose, onSave, currentConfig, theme, onThemeChange }: SettingsProps) {
-    const [activeTab, setActiveTab] = useState<"providers" | "appearance" | "about">("providers");
+    const [activeTab, setActiveTab] = useState<"providers" | "cli" | "appearance" | "about">("providers");
     const [selectedProvider, setSelectedProvider] = useState<AIProvider["id"]>(currentConfig?.provider || "claude");
     const [apiKeys, setApiKeys] = useState<Record<string, string>>({});
     const [selectedModels] = useState<Record<string, string>>({});
     const [showKeys, setShowKeys] = useState<Record<string, boolean>>({});
     const [showSteps, setShowSteps] = useState<Record<string, boolean>>({});
 
-    useEffect(() => {
-        loadApiKeys();
-    }, []);
+    // Custom CLI state
+    const [customCLIs, setCustomCLIs] = useState<WorkerCLIOption[]>(() => loadCustomCLIOptions());
+    const [newCLIName, setNewCLIName] = useState("");
+    const [newCLICommand, setNewCLICommand] = useState("");
 
-    const loadApiKeys = async () => {
-        for (const provider of AI_PROVIDERS) {
-            try {
-                const key = await invoke<string>("get_api_key", { provider: provider.id });
-                if (key) {
-                    setApiKeys(prev => ({ ...prev, [provider.id]: key }));
+    const handleAddCustomCLI = useCallback(() => {
+        const name = newCLIName.trim();
+        const command = newCLICommand.trim();
+        if (!name || !command) return;
+
+        const id = command.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '');
+        const allOptions = getWorkerCLIOptions();
+        if (allOptions.some(o => o.id === id)) return; // duplicate
+
+        const newOption: WorkerCLIOption = { id, name, command, description: `Custom: ${name}` };
+        const updated = [...customCLIs, newOption];
+        setCustomCLIs(updated);
+        saveCustomCLIOptions(updated);
+        setNewCLIName("");
+        setNewCLICommand("");
+    }, [customCLIs, newCLIName, newCLICommand]);
+
+    const handleRemoveCustomCLI = useCallback((id: string) => {
+        const updated = customCLIs.filter(c => c.id !== id);
+        setCustomCLIs(updated);
+        saveCustomCLIOptions(updated);
+    }, [customCLIs]);
+
+    useEffect(() => {
+        let cancelled = false;
+        (async () => {
+            const loaded: Record<string, string> = {};
+            for (const provider of AI_PROVIDERS) {
+                try {
+                    const key = await invoke<string>("get_api_key", { provider: provider.id });
+                    if (key) loaded[provider.id] = key;
+                } catch {
+                    // Key not found
                 }
-            } catch (e) {
-                // Key not found
             }
-        }
-    };
+            if (!cancelled) setApiKeys(loaded);
+        })();
+        return () => { cancelled = true; };
+    }, []);
 
     const handleSaveKey = async (providerId: string, key: string) => {
         try {
@@ -236,6 +266,12 @@ export function Settings({ isOpen, onClose, onSave, currentConfig, theme, onThem
                             onClick={() => setActiveTab("providers")}
                         >
                             AI Providers
+                        </button>
+                        <button
+                            className={`nav-item ${activeTab === "cli" ? "active" : ""}`}
+                            onClick={() => setActiveTab("cli")}
+                        >
+                            CLI Tools
                         </button>
                         <button
                             className={`nav-item ${activeTab === "appearance" ? "active" : ""}`}
@@ -344,6 +380,71 @@ export function Settings({ isOpen, onClose, onSave, currentConfig, theme, onThem
                                         </div>
                                     </div>
                                 ))}
+                            </div>
+                        )}
+
+                        {activeTab === "cli" && (
+                            <div className="cli-tab">
+                                <p className="settings-description">
+                                    Manage CLI tools available in Swarm Mode and the terminal quick-launch bar. Built-in CLIs cannot be removed.
+                                </p>
+
+                                <div className="cli-list">
+                                    {getWorkerCLIOptions().map(option => (
+                                        <div key={option.id} className={`cli-row ${option.builtin ? 'builtin' : 'custom'}`}>
+                                            <div className="cli-row-info">
+                                                <span className="cli-row-name">{option.name}</span>
+                                                <code className="cli-row-command">{option.command}</code>
+                                            </div>
+                                            <div className="cli-row-actions">
+                                                {option.builtin ? (
+                                                    <span className="cli-row-badge builtin">Built-in</span>
+                                                ) : (
+                                                    <button
+                                                        className="cli-row-remove"
+                                                        onClick={() => handleRemoveCustomCLI(option.id)}
+                                                        title="Remove custom CLI"
+                                                    >
+                                                        Remove
+                                                    </button>
+                                                )}
+                                            </div>
+                                        </div>
+                                    ))}
+                                </div>
+
+                                <div className="cli-add-form">
+                                    <h4>Add Custom CLI</h4>
+                                    <div className="cli-add-inputs">
+                                        <input
+                                            type="text"
+                                            placeholder="Display name (e.g. Aider)"
+                                            value={newCLIName}
+                                            onChange={e => setNewCLIName(e.target.value)}
+                                            className="cli-add-input"
+                                        />
+                                        <input
+                                            type="text"
+                                            placeholder="Command (e.g. aider)"
+                                            value={newCLICommand}
+                                            onChange={e => setNewCLICommand(e.target.value)}
+                                            className="cli-add-input"
+                                            onKeyDown={e => {
+                                                if (e.key === 'Enter') handleAddCustomCLI();
+                                            }}
+                                        />
+                                        <button
+                                            className="cli-add-btn"
+                                            onClick={handleAddCustomCLI}
+                                            disabled={!newCLIName.trim() || !newCLICommand.trim()}
+                                        >
+                                            Add
+                                        </button>
+                                    </div>
+                                    <p className="cli-add-hint">
+                                        The command must be installed and accessible in your PATH. Custom CLIs will appear in Swarm Mode's worker CLI picker and the terminal quick-launch bar.
+                                    </p>
+                                </div>
                             </div>
                         )}
 

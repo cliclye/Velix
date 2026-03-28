@@ -8,7 +8,8 @@ export * from './types';
 
 // Core components
 export { OrchestratorCore, orchestrator } from './OrchestratorCore';
-export { AgentManager, WORKER_CLI_OPTIONS, detectWorkerCLIAvailability } from './AgentManager';
+export { AgentManager, WORKER_CLI_OPTIONS, getWorkerCLIOptions, loadCustomCLIOptions, saveCustomCLIOptions, detectWorkerCLIAvailability } from './AgentManager';
+export type { WorkerCLIOption } from './AgentManager';
 export { SwarmEventEmitter, swarmEvents } from './SwarmEventEmitter';
 
 // Role system

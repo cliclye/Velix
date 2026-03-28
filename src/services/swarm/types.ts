@@ -27,12 +27,7 @@ export type AgentStatus =
   | 'failed'
   | 'terminated';
 
-export type WorkerCLI =
-  | 'claude'
-  | 'gemini'
-  | 'velix'
-  | 'codex'
-  | 'copilot';
+export type WorkerCLI = string;
 
 // ============= Agent Roles =============
 

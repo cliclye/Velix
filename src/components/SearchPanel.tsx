@@ -20,10 +20,12 @@ export const SearchPanel: React.FC<SearchPanelProps> = ({ currentDir, onResultCl
   const [results, setResults] = useState<SearchMatch[]>([]);
   const [isSearching, setIsSearching] = useState(false);
   const [searchTime, setSearchTime] = useState<number | null>(null);
+  const searchRequestId = React.useRef(0);
 
   const handleSearch = async () => {
     if (!searchTerm.trim() || !currentDir) return;
 
+    const requestId = ++searchRequestId.current;
     setIsSearching(true);
     const startTime = Date.now();
 
@@ -35,13 +37,15 @@ export const SearchPanel: React.FC<SearchPanelProps> = ({ currentDir, onResultCl
         maxResults: 500,
       });
 
+      if (requestId !== searchRequestId.current) return;
       setResults(matches);
       setSearchTime(Date.now() - startTime);
     } catch (err) {
+      if (requestId !== searchRequestId.current) return;
       console.error('Search failed:', err);
       setResults([]);
     } finally {
-      setIsSearching(false);
+      if (requestId === searchRequestId.current) setIsSearching(false);
     }
   };
 

@@ -211,64 +211,76 @@ export const GitPanel: React.FC<GitPanelProps> = ({ currentDir, onFileClick, onB
     }
   }, [showInitRemote]);
 
+  const currentDirRef = useRef(currentDir);
+  currentDirRef.current = currentDir;
+
   const loadGitStatus = async () => {
-    if (!currentDir) return;
+    const dir = currentDirRef.current;
+    if (!dir) return;
 
     setLoading(true);
     setError(null);
 
     try {
       const status = await invoke<GitStatusResult>('get_git_status', {
-        repoPath: currentDir,
+        repoPath: dir,
       });
+      if (currentDirRef.current !== dir) return;
       setGitStatus(status);
     } catch (err) {
+      if (currentDirRef.current !== dir) return;
       const errorMessage = err instanceof Error ? err.message : String(err);
       setError(errorMessage);
       setGitStatus(null);
     } finally {
-      setLoading(false);
+      if (currentDirRef.current === dir) setLoading(false);
     }
   };
 
   const loadRepoInfo = async () => {
-    if (!currentDir) return;
+    const dir = currentDirRef.current;
+    if (!dir) return;
     try {
       const info = await invoke<GitRemoteInfo>('get_git_remote_info', {
-        repoPath: currentDir,
+        repoPath: dir,
       });
+      if (currentDirRef.current !== dir) return;
       setRepoInfo(info);
     } catch {
-      setRepoInfo(null);
+      if (currentDirRef.current === dir) setRepoInfo(null);
     }
   };
 
   const loadBranches = async () => {
-    if (!currentDir) return;
+    const dir = currentDirRef.current;
+    if (!dir) return;
     try {
       const branches = await invoke<GitBranchList>('git_list_branches', {
-        repoPath: currentDir,
+        repoPath: dir,
       });
+      if (currentDirRef.current !== dir) return;
       setBranchList(branches);
     } catch {
-      setBranchList(null);
+      if (currentDirRef.current === dir) setBranchList(null);
     }
   };
 
   const loadDiff = async (file: GitFileStatus) => {
-    if (!currentDir) return;
+    const dir = currentDirRef.current;
+    if (!dir) return;
 
     try {
       const diffContent = await invoke<string>('get_git_diff', {
-        repoPath: currentDir,
+        repoPath: dir,
         filePath: file.path,
         staged: file.staged,
       });
+      if (currentDirRef.current !== dir) return;
       setDiff(diffContent);
       setSelectedFile(file);
     } catch (err) {
       console.error('Failed to load diff:', err);
-      setDiff('');
+      if (currentDirRef.current === dir) setDiff('');
     }
   };
 

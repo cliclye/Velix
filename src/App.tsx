@@ -38,6 +38,13 @@ const makeId = (prefix: string) =>
 const buildPaneTitle = (index: number) => `Pane ${index}`;
 const MAX_PANES_PER_TAB = 9;
 const PANE_DRAG_DATA_KEY = "application/x-velix-pane";
+const RIGHT_PANEL_WIDTH_KEY = "velix-right-panel-width-pct";
+
+const clampRightPanelPct = (n: number) => {
+  if (!Number.isFinite(n)) return 40;
+  return Math.min(78, Math.max(22, n));
+};
+
 const getPaneGridColumnCount = (paneCount: number) => (paneCount <= 1 ? 1 : paneCount <= 4 ? 2 : 3);
 
 const renumberPanes = (panes: TerminalPaneState[]) =>
@@ -115,6 +122,14 @@ function App() {
   const [lastWorkspaceTabId, setLastWorkspaceTabId] = useState(initialWorkspaceTabIdRef.current);
   const [draggingPaneId, setDraggingPaneId] = useState<string | null>(null);
   const [paneDropPreview, setPaneDropPreview] = useState<{ tabId: string; index: number } | null>(null);
+  const paneDragSourceRef = useRef<{ tabId: string; paneId: string } | null>(null);
+
+  const [rightPanelWidthPct, setRightPanelWidthPct] = useState(() => {
+    if (typeof window === "undefined") return 40;
+    return clampRightPanelPct(parseFloat(localStorage.getItem(RIGHT_PANEL_WIDTH_KEY) || "40"));
+  });
+  const [mainSplitResizing, setMainSplitResizing] = useState(false);
+  const mainSplitResizeDragRef = useRef<{ startX: number; startPct: number } | null>(null);
 
   const activeWorkspaceTabId = useMemo(() => {
     const targetId = activeTerminalId === "swarm" ? lastWorkspaceTabId : activeTerminalId;
@@ -158,27 +173,36 @@ function App() {
   const addWorkspaceTab = useCallback(() => {
     const newTabId = makeId("tab");
     const newPaneId = makeId("pane");
-    const nextTabNumber = workspaceTabs.length + 1;
 
-    setWorkspaceTabs((prev) => [
-      ...prev,
-      {
-        id: newTabId,
-        title: `Tab ${nextTabNumber}`,
-        panes: [{ id: newPaneId, title: buildPaneTitle(1) }],
-        activePaneId: newPaneId,
-        shellCwd: defaultShellCwd,
-        projectDir: "",
-        projectFileContents: {},
-        workspaceContext: null,
-        gitChanges: [],
-        currentBranch: "",
-      },
-    ]);
+    setWorkspaceTabs((prev) => {
+      const existingNumbers = prev
+        .map((tab) => {
+          const match = tab.title.match(/^Tab (\d+)$/);
+          return match ? parseInt(match[1], 10) : 0;
+        })
+        .filter(Boolean);
+      const nextNumber = existingNumbers.length > 0 ? Math.max(...existingNumbers) + 1 : prev.length + 1;
+
+      return [
+        ...prev,
+        {
+          id: newTabId,
+          title: `Tab ${nextNumber}`,
+          panes: [{ id: newPaneId, title: buildPaneTitle(1) }],
+          activePaneId: newPaneId,
+          shellCwd: defaultShellCwd,
+          projectDir: "",
+          projectFileContents: {},
+          workspaceContext: null,
+          gitChanges: [],
+          currentBranch: "",
+        },
+      ];
+    });
 
     setActiveTerminalId(newTabId);
     setLastWorkspaceTabId(newTabId);
-  }, [defaultShellCwd, workspaceTabs.length]);
+  }, [defaultShellCwd]);
 
   const addSplitPane = useCallback((targetTabId?: string) => {
     const tabId = targetTabId || activeWorkspaceTabId;
@@ -208,9 +232,12 @@ function App() {
 
   const closeSwarmTab = useCallback(() => {
     setSwarmTabOpen(false);
-    setActiveTerminalId((prev) =>
-      prev === "swarm" ? (workspaceTabs.some((tab) => tab.id === lastWorkspaceTabId) ? lastWorkspaceTabId : (workspaceTabs[0]?.id || "")) : prev,
-    );
+    setActiveTerminalId((prev) => {
+      if (prev !== "swarm") return prev;
+      return workspaceTabs.some((tab) => tab.id === lastWorkspaceTabId)
+        ? lastWorkspaceTabId
+        : (workspaceTabs[0]?.id || "");
+    });
   }, [lastWorkspaceTabId, workspaceTabs]);
 
   const closeSplitPane = useCallback((tabId: string, paneId: string, e?: React.MouseEvent) => {
@@ -275,17 +302,27 @@ function App() {
     }
   }, []);
 
+  /** Browsers often hide getData() during dragover; use the ref set on drag start for live hit-testing. */
+  const resolveDraggedPane = useCallback((event: React.DragEvent): { tabId: string; paneId: string } | null => {
+    if (paneDragSourceRef.current) {
+      return paneDragSourceRef.current;
+    }
+    return readDraggedPane(event);
+  }, [readDraggedPane]);
+
   const handlePaneDragStart = useCallback((tabId: string, paneId: string, event: React.DragEvent<HTMLDivElement>) => {
     const payload = JSON.stringify({ tabId, paneId });
     event.dataTransfer.setData(PANE_DRAG_DATA_KEY, payload);
     event.dataTransfer.setData("text/plain", payload);
     event.dataTransfer.effectAllowed = "move";
+    paneDragSourceRef.current = { tabId, paneId };
     setDraggingPaneId(paneId);
     setPaneDropPreview(null);
     setActiveTerminalId(tabId);
   }, []);
 
   const handlePaneDragEnd = useCallback(() => {
+    paneDragSourceRef.current = null;
     setDraggingPaneId(null);
     setPaneDropPreview(null);
   }, []);
@@ -317,7 +354,8 @@ function App() {
   }, []);
 
   const handlePanePanelDragOver = useCallback((event: React.DragEvent, tab: WorkspaceTabState) => {
-    const dragged = readDraggedPane(event);
+    if (event.target !== event.currentTarget) return;
+    const dragged = resolveDraggedPane(event);
     if (!dragged || dragged.tabId !== tab.id) return;
     event.preventDefault();
     event.dataTransfer.dropEffect = "move";
@@ -326,14 +364,14 @@ function App() {
         ? current
         : { tabId: tab.id, index: tab.panes.length },
     );
-  }, [readDraggedPane]);
+  }, [resolveDraggedPane]);
 
   const handlePaneTargetDragOver = useCallback((
     event: React.DragEvent<HTMLDivElement>,
     tab: WorkspaceTabState,
     targetPaneId: string,
   ) => {
-    const dragged = readDraggedPane(event);
+    const dragged = resolveDraggedPane(event);
     if (!dragged || dragged.tabId !== tab.id) return;
     event.preventDefault();
     event.dataTransfer.dropEffect = "move";
@@ -343,38 +381,83 @@ function App() {
         ? current
         : { tabId: tab.id, index: nextIndex },
     );
-  }, [getPaneDropIndex, readDraggedPane]);
+  }, [getPaneDropIndex, resolveDraggedPane]);
 
   const handlePaneDrop = useCallback((event: React.DragEvent, tab: WorkspaceTabState) => {
-    const dragged = readDraggedPane(event);
+    const dragged = resolveDraggedPane(event);
     if (!dragged || dragged.tabId !== tab.id) return;
     event.preventDefault();
     const targetIndex = paneDropPreview?.tabId === tab.id ? paneDropPreview.index : tab.panes.length;
     movePaneWithinTab(tab.id, dragged.paneId, targetIndex);
+    paneDragSourceRef.current = null;
     setDraggingPaneId(null);
     setPaneDropPreview(null);
-  }, [movePaneWithinTab, paneDropPreview, readDraggedPane]);
+  }, [movePaneWithinTab, paneDropPreview, resolveDraggedPane]);
+
+  const handleMainSplitResizeStart = useCallback((e: React.MouseEvent) => {
+    e.preventDefault();
+    mainSplitResizeDragRef.current = { startX: e.clientX, startPct: rightPanelWidthPct };
+    setMainSplitResizing(true);
+  }, [rightPanelWidthPct]);
+
+  useEffect(() => {
+    if (!mainSplitResizing) return;
+
+    const onMove = (e: MouseEvent) => {
+      const ref = mainSplitResizeDragRef.current;
+      if (!ref) return;
+      const main = document.querySelector(".main-split") as HTMLElement | null;
+      if (!main) return;
+      const w = main.getBoundingClientRect().width;
+      if (w <= 0) return;
+      const delta = e.clientX - ref.startX;
+      const deltaPct = (delta / w) * 100;
+      const next = clampRightPanelPct(ref.startPct + deltaPct);
+      setRightPanelWidthPct(next);
+    };
+
+    const onUp = () => {
+      mainSplitResizeDragRef.current = null;
+      setMainSplitResizing(false);
+      setRightPanelWidthPct((current) => {
+        localStorage.setItem(RIGHT_PANEL_WIDTH_KEY, String(current));
+        return current;
+      });
+    };
+
+    window.addEventListener("mousemove", onMove);
+    window.addEventListener("mouseup", onUp);
+    return () => {
+      window.removeEventListener("mousemove", onMove);
+      window.removeEventListener("mouseup", onUp);
+    };
+  }, [mainSplitResizing]);
 
   const closeWorkspaceTab = useCallback((tabId: string, e?: React.MouseEvent) => {
     e?.stopPropagation();
-    if (workspaceTabs.length === 1) return;
 
-    const tabIndex = workspaceTabs.findIndex((tab) => tab.id === tabId);
-    const remainingTabs = workspaceTabs.filter((tab) => tab.id !== tabId);
-    const fallbackTab =
-      remainingTabs[Math.max(0, tabIndex - 1)] ||
-      remainingTabs[0] ||
-      null;
+    setWorkspaceTabs((prev) => {
+      if (prev.length === 1) return prev;
 
-    setWorkspaceTabs(remainingTabs);
+      const tabIndex = prev.findIndex((tab) => tab.id === tabId);
+      const remainingTabs = prev.filter((tab) => tab.id !== tabId);
+      const fallbackTab =
+        remainingTabs[Math.min(tabIndex, remainingTabs.length - 1)] ||
+        remainingTabs[0] ||
+        null;
 
-    if (activeTerminalId === tabId) {
-      setActiveTerminalId(fallbackTab?.id || "");
-    }
-    if (lastWorkspaceTabId === tabId) {
-      setLastWorkspaceTabId(fallbackTab?.id || "");
-    }
-  }, [activeTerminalId, lastWorkspaceTabId, workspaceTabs]);
+      const fallbackId = fallbackTab?.id || "";
+
+      setActiveTerminalId((current) =>
+        current === tabId ? fallbackId : current,
+      );
+      setLastWorkspaceTabId((current) =>
+        current === tabId ? fallbackId : current,
+      );
+
+      return remainingTabs;
+    });
+  }, []);
 
   const closeActivePaneOrTab = useCallback(() => {
     if (activeTerminalId === "swarm") {
@@ -1055,7 +1138,7 @@ Working directory: ${currentDir || "unknown"}`;
         </div>
       </div>
 
-      <main className="main-split">
+      <main className={`main-split${mainSplitResizing ? " resizing" : ""}`}>
         <div className="terminal-pane">
           <div className="terminal-area">
             <div className="terminal-topbar">
@@ -1245,6 +1328,8 @@ Working directory: ${currentDir || "unknown"}`;
                                 <div className="split-terminal-actions">
                                   <span className="split-terminal-drag">⋮⋮</span>
                                   <button
+                                    type="button"
+                                    draggable={false}
                                     className="split-terminal-close"
                                     onClick={(e) => closeSplitPane(tab.id, pane.id, e)}
                                   >
@@ -1261,7 +1346,7 @@ Working directory: ${currentDir || "unknown"}`;
                                   terminalRefs.current.delete(pane.id);
                                 }
                               }}
-                              cwd={tab.shellCwd || defaultShellCwd}
+                              cwd={tab.projectDir || tab.shellCwd || defaultShellCwd}
                               theme={theme}
                               onAIRequest={handleAIRequest}
                               aiEnabled={!!aiConfig?.apiKey}
@@ -1282,7 +1367,27 @@ Working directory: ${currentDir || "unknown"}`;
           </div>
         </div>
 
-        <div className={`right-panel${hasRightPanel ? " open" : ""}`}>
+        {hasRightPanel && (
+          <div
+            className="resize-handle"
+            role="separator"
+            aria-orientation="vertical"
+            aria-label="Resize side panel"
+            onMouseDown={handleMainSplitResizeStart}
+          />
+        )}
+
+        <div
+          className={`right-panel${hasRightPanel ? " open" : ""}`}
+          style={
+            hasRightPanel
+              ? {
+                  flex: `0 0 ${rightPanelWidthPct}%`,
+                  width: `${rightPanelWidthPct}%`,
+                }
+              : undefined
+          }
+        >
           {showSearchPanel && <SearchPanel currentDir={currentDir} />}
           {showGitPanel && (
             <GitPanel

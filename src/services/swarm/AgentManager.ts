@@ -46,43 +46,76 @@ const sanitizeTerminalOutput = (data: string): string =>
     .replace(ANSI_ESCAPE_REGEX, '')
     .replace(/[\u0000-\u0008\u000B-\u001A\u001C-\u001F\u007F]/g, '');
 
-export const WORKER_CLI_OPTIONS: Array<{
+export interface WorkerCLIOption {
   id: WorkerCLI;
   name: string;
   command: string;
   description: string;
-}> = [
+  builtin?: boolean;
+}
+
+const BUILTIN_CLI_OPTIONS: WorkerCLIOption[] = [
   {
     id: 'claude',
     name: 'Claude Code',
     command: 'claude',
     description: 'Anthropic Claude Code CLI',
+    builtin: true,
   },
   {
     id: 'gemini',
     name: 'Gemini CLI',
     command: 'gemini',
     description: 'Google Gemini terminal agent',
+    builtin: true,
   },
   {
     id: 'velix',
     name: 'Velix CLI',
     command: 'velix',
     description: 'Velix AI CLI',
+    builtin: true,
   },
   {
     id: 'codex',
     name: 'Codex CLI',
     command: 'codex',
     description: 'OpenAI Codex CLI',
+    builtin: true,
   },
   {
     id: 'copilot',
     name: 'Copilot CLI',
     command: 'copilot',
     description: 'GitHub Copilot CLI',
+    builtin: true,
   },
 ];
+
+const CUSTOM_CLI_STORAGE_KEY = 'velix-custom-cli-options';
+
+export function loadCustomCLIOptions(): WorkerCLIOption[] {
+  if (typeof window === 'undefined') return [];
+  try {
+    const raw = window.localStorage.getItem(CUSTOM_CLI_STORAGE_KEY);
+    if (!raw) return [];
+    return JSON.parse(raw) as WorkerCLIOption[];
+  } catch {
+    return [];
+  }
+}
+
+export function saveCustomCLIOptions(options: WorkerCLIOption[]): void {
+  if (typeof window === 'undefined') return;
+  window.localStorage.setItem(CUSTOM_CLI_STORAGE_KEY, JSON.stringify(options));
+}
+
+export function getWorkerCLIOptions(): WorkerCLIOption[] {
+  return [...BUILTIN_CLI_OPTIONS, ...loadCustomCLIOptions()];
+}
+
+/** @deprecated Use getWorkerCLIOptions() instead — kept for import compatibility */
+export const WORKER_CLI_OPTIONS = BUILTIN_CLI_OPTIONS;
 
 export interface WorkerCLIStatus {
   available: boolean;
@@ -92,11 +125,10 @@ export interface WorkerCLIStatus {
 export async function detectWorkerCLIAvailability(
   _cwd: string,
 ): Promise<Record<WorkerCLI, WorkerCLIStatus>> {
+  const allOptions = getWorkerCLIOptions();
   const entries = await Promise.all(
-    WORKER_CLI_OPTIONS.map(async (option) => {
+    allOptions.map(async (option) => {
       try {
-        // check_cli_available resolves the full login-shell PATH (including nvm /
-        // homebrew / cargo) and also scans common install locations directly.
         const path = await invoke<string>('check_cli_available', {
           command: option.command,
         });
@@ -321,7 +353,7 @@ export class AgentManager {
       ownedFiles?: string[];
     },
   ): Promise<Agent> {
-    const agentId = `agent_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
+    const agentId = `agent_${Date.now()}_${Math.random().toString(36).slice(2, 11)}`;
     const sessionId = `swarm_${agentId}`;
 
     // Create PTY session — shell starts in the workspace directory automatically
@@ -418,6 +450,8 @@ Task: ${task}`;
   private buildWorkerStartCommand(): string {
     const config = aiService.getConfig();
     const parts: string[] = [];
+    const allOptions = getWorkerCLIOptions();
+    const cliOption = allOptions.find((o) => o.id === this.workerCLI);
 
     switch (this.workerCLI) {
       case 'claude':
@@ -445,7 +479,12 @@ Task: ${task}`;
         parts.push('copilot');
         break;
       default:
-        parts.push('claude', '--dangerously-skip-permissions');
+        // Custom CLI — use the command from the option entry
+        if (cliOption) {
+          parts.push(cliOption.command);
+        } else {
+          parts.push('claude', '--dangerously-skip-permissions');
+        }
         break;
     }
 

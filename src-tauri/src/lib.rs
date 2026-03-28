@@ -271,8 +271,8 @@ fn pty_create(
     let mut cmd = CommandBuilder::new(&shell);
     cmd.arg("-l"); // Login shell to load user's profile
 
-    // Set working directory
-    let working_dir = cwd.unwrap_or_else(|| dirs_or_home());
+    // Set working directory (frontend may pass "~" until the project path is applied)
+    let working_dir = resolve_pty_cwd(cwd);
     cmd.cwd(&working_dir);
 
     cmd.env("PATH", &full_path);
@@ -608,6 +608,23 @@ fn set_shell_cwd(cwd: &str, state: State<'_, AppState>) -> Result<(), String> {
 
 fn dirs_or_home() -> String {
     std::env::var("HOME").unwrap_or_else(|_| "/".to_string())
+}
+
+/// Expand `~` / `~/...` for PTY cwd; the shell API may send `"~"` before the real path is known.
+fn resolve_pty_cwd(cwd: Option<String>) -> String {
+    let home = dirs_or_home();
+    let raw = cwd.unwrap_or_else(|| home.clone());
+    if raw == "~" {
+        return home;
+    }
+    if let Some(rest) = raw.strip_prefix("~/") {
+        let h = home.trim_end_matches('/');
+        if rest.is_empty() {
+            return h.to_string();
+        }
+        return format!("{}/{}", h, rest);
+    }
+    raw
 }
 
 /// Read all source files from a project directory. Returns relative_path -> content.

@@ -4,7 +4,7 @@ import {
   SwarmEventEmitter,
   getRole,
   claudeCoordinator,
-  WORKER_CLI_OPTIONS,
+  getWorkerCLIOptions,
   detectWorkerCLIAvailability,
 } from '../../services/swarm';
 import { CoordinatorConfig } from '../../services/swarm/ClaudeCoordinator';
@@ -118,7 +118,7 @@ const trimCoordinatorLog = (entries: CoordinatorLogEntry[]) => entries.slice(-12
 
 const buildDefaultWorkerCLIAvailability = (): WorkerCLIAvailability =>
   Object.fromEntries(
-    WORKER_CLI_OPTIONS.map((option) => [
+    getWorkerCLIOptions().map((option) => [
       option.id,
       { available: false, detail: 'Checking availability…' },
     ]),
@@ -317,6 +317,8 @@ export const SwarmPanel: React.FC<SwarmPanelProps> = ({
 }) => {
   const managerRef = useRef<AgentManager | null>(null);
   const syncIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  /** Prevents overlapping coordinator syncs when the 45s interval fires with a stale `isSyncing` closure. */
+  const coordinatorSyncInFlightRef = useRef(false);
 
   const [agents, setAgents] = useState<Agent[]>([]);
   const [goal, setGoal] = useState('');
@@ -325,7 +327,7 @@ export const SwarmPanel: React.FC<SwarmPanelProps> = ({
   const [workerCLI, setWorkerCLI] = useState<WorkerCLI>(() => {
     if (typeof window === 'undefined') return 'claude';
     const stored = window.localStorage.getItem(WORKER_CLI_STORAGE_KEY);
-    return WORKER_CLI_OPTIONS.some((option) => option.id === stored)
+    return getWorkerCLIOptions().some((option) => option.id === stored)
       ? (stored as WorkerCLI)
       : 'claude';
   });
@@ -346,8 +348,6 @@ export const SwarmPanel: React.FC<SwarmPanelProps> = ({
   const [isLaunching, setIsLaunching] = useState(false);
   const [isSyncing, setIsSyncing] = useState(false);
   const [hasCoordinatorKey, setHasCoordinatorKey] = useState(false);
-  // Keep hasClaudeKey alias for any existing references
-  const hasClaudeKey = hasCoordinatorKey;
   const [requirementsLoaded, setRequirementsLoaded] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [statusLabel, setStatusLabel] = useState('Idle');
@@ -356,6 +356,7 @@ export const SwarmPanel: React.FC<SwarmPanelProps> = ({
   const [coordinatorLog, setCoordinatorLog] = useState<CoordinatorLogEntry[]>([]);
   const [selectedAgentId, setSelectedAgentId] = useState<string | null>(null);
   const [agentChatMsg, setAgentChatMsg] = useState('');
+  const [showAdvancedConfig, setShowAdvancedConfig] = useState(false);
   const [nodePositions, setNodePositions] = useState<Record<string, MindMapPosition>>({});
   const [manualConnections, setManualConnections] = useState<MindMapConnection[]>([]);
   const pendingDroppedNodesRef = useRef<Array<{ role: SwarmLaunchRole; position: MindMapPosition }>>([]);
@@ -504,10 +505,13 @@ export const SwarmPanel: React.FC<SwarmPanelProps> = ({
 
   const handleCoordinatorSync = useCallback(async (reason: 'manual' | 'automatic' = 'manual') => {
     const manager = managerRef.current;
-    if (!manager || !activeGoal || !coordinatorPlan || isSyncing) return;
+    if (!manager || !activeGoal || !coordinatorPlan || coordinatorSyncInFlightRef.current) return;
 
     const snapshot = manager.getAllAgents();
     if (snapshot.length === 0) return;
+
+    coordinatorSyncInFlightRef.current = true;
+
     const syncPlan = {
       ...coordinatorPlan,
       assignments: applyManualConnectionsToAssignments(coordinatorPlan.assignments, manualConnections),
@@ -561,9 +565,10 @@ export const SwarmPanel: React.FC<SwarmPanelProps> = ({
       appendLog('error', `Coordinator sync failed: ${message}`);
       setStatusLabel('Sync Error');
     } finally {
+      coordinatorSyncInFlightRef.current = false;
       setIsSyncing(false);
     }
-  }, [activeGoal, appendLog, coordinatorModel, coordinatorPlan, coordinatorProvider, isSyncing, manualConnections, refreshAgents, workspacePath]);
+  }, [activeGoal, appendLog, coordinatorModel, coordinatorPlan, coordinatorProvider, manualConnections, refreshAgents, workspacePath]);
 
   useEffect(() => {
     stopAutoSync();
@@ -572,7 +577,7 @@ export const SwarmPanel: React.FC<SwarmPanelProps> = ({
 
     syncIntervalRef.current = setInterval(() => {
       const manager = managerRef.current;
-      if (!manager || isLaunching || isSyncing) return;
+      if (!manager || isLaunching || coordinatorSyncInFlightRef.current) return;
 
       const hasLiveAgents = manager.getAllAgents().some((agent) => !FINISHED_STATUSES.has(agent.status));
       if (!hasLiveAgents) return;
@@ -581,7 +586,7 @@ export const SwarmPanel: React.FC<SwarmPanelProps> = ({
     }, 45000);
 
     return stopAutoSync;
-  }, [activeGoal, coordinatorPlan, handleCoordinatorSync, isLaunching, isSyncing, stopAutoSync]);
+  }, [activeGoal, coordinatorPlan, handleCoordinatorSync, isLaunching, stopAutoSync]);
 
   const handleCoordinatorProviderChange = useCallback((provider: ProviderID) => {
     setCoordinatorProvider(provider);
@@ -630,7 +635,7 @@ export const SwarmPanel: React.FC<SwarmPanelProps> = ({
       return;
     }
     if (!workerCLIAvailability[workerCLI]?.available) {
-      setError(`${WORKER_CLI_OPTIONS.find((option) => option.id === workerCLI)?.name || 'Selected CLI'} is not available on PATH.`);
+      setError(`${getWorkerCLIOptions().find((option) => option.id === workerCLI)?.name || 'Selected CLI'} is not available on PATH.`);
       return;
     }
 
@@ -640,7 +645,7 @@ export const SwarmPanel: React.FC<SwarmPanelProps> = ({
     setCoordinatorPlan(null);
     setLastSync(null);
     setActiveGoal(trimmedGoal);
-    appendLog('plan', `Coordinator planning ${rolesToLaunch.length} owned work lanes with ${WORKER_CLI_OPTIONS.find((option) => option.id === workerCLI)?.name || workerCLI}.`);
+    appendLog('plan', `Coordinator planning ${rolesToLaunch.length} owned work lanes with ${getWorkerCLIOptions().find((option) => option.id === workerCLI)?.name || workerCLI}.`);
 
     try {
       if (manager.getAgentCount() > 0) {
@@ -754,7 +759,7 @@ export const SwarmPanel: React.FC<SwarmPanelProps> = ({
   const workerCount = useMemo(() => rolesToLaunch.length, [rolesToLaunch]);
   const rolesReady = useMemo(() => workerCount >= MIN_AGENTS && workerCount <= MAX_AGENTS, [workerCount]);
   const selectedWorkerCLIOption = useMemo(
-    () => WORKER_CLI_OPTIONS.find((option) => option.id === workerCLI) || WORKER_CLI_OPTIONS[0],
+    () => getWorkerCLIOptions().find((option) => option.id === workerCLI) || getWorkerCLIOptions()[0],
     [workerCLI],
   );
   const selectedWorkerCLIStatus = useMemo(() => workerCLIAvailability[workerCLI], [workerCLIAvailability, workerCLI]);
@@ -891,6 +896,16 @@ export const SwarmPanel: React.FC<SwarmPanelProps> = ({
     }
   }, [boardAssignmentIdsKey, selectedAgentId]);
 
+  const coordinatorProviderName = useMemo(
+    () => PROVIDERS.find((p) => p.id === coordinatorProvider)?.name || coordinatorProvider,
+    [coordinatorProvider],
+  );
+  const coordinatorModels = useMemo(
+    () => PROVIDERS.find((p) => p.id === coordinatorProvider)?.models ?? [],
+    [coordinatorProvider],
+  );
+  const effectiveCoordinatorModel = coordinatorModel || coordinatorModels[0] || '';
+
   if (!isOpen) return null;
 
   return (
@@ -898,16 +913,29 @@ export const SwarmPanel: React.FC<SwarmPanelProps> = ({
       <div className="swarm-header">
         <div className="swarm-header-copy">
           <h2>Swarm Mode</h2>
-          <span>Coordinator-led agents with ownership, sync, and review gates</span>
+          <span>{workspaceName} &middot; {statusLabel} &middot; {runningCount}/{agents.length} active</span>
         </div>
-        <button className="close-btn" onClick={onClose}>×</button>
+        <div className="swarm-header-actions">
+          <button
+            className="swarm-secondary-btn swarm-header-btn"
+            onClick={() => void handleCoordinatorSync('manual')}
+            disabled={!coordinatorPlan || agents.length === 0 || isSyncing}
+          >
+            {isSyncing ? 'Syncing…' : 'Sync'}
+          </button>
+          {agents.length > 0 && (
+            <button className="swarm-danger-btn swarm-header-btn" onClick={handleKillAll}>
+              Kill All
+            </button>
+          )}
+          <button className="close-btn" onClick={onClose}>×</button>
+        </div>
       </div>
 
       <div className="swarm-split-body">
         <div className="swarm-mindmap-pane">
-          {/* Role palette — drag chips onto the canvas to add agents */}
           <div className="smm-palette">
-            <span className="smm-palette-label">Add agent</span>
+            <span className="smm-palette-label">Agents</span>
             {ROLE_ORDER.map((role) => {
               const count = roleCounts[role];
               const limits = ROLE_LIMITS[role];
@@ -927,9 +955,9 @@ export const SwarmPanel: React.FC<SwarmPanelProps> = ({
                     e.dataTransfer.effectAllowed = 'copy';
                   }}
                   title={
-                    swarmActive ? 'Swarm is running — stop it before adjusting the roster'
-                    : canAddMore ? `Drag to add a ${role} agent`
-                    : `Drag to reposition the ${role} node`
+                    swarmActive ? 'Stop swarm before adjusting roster'
+                    : canAddMore ? `Drag to add a ${role}`
+                    : `Drag to reposition ${role}`
                   }
                 >
                   <span className="smm-palette-dot" style={{ background: PALETTE_ROLE_COLORS[role] }} />
@@ -954,7 +982,6 @@ export const SwarmPanel: React.FC<SwarmPanelProps> = ({
             dragDataKey={PALETTE_DRAG_KEY}
           />
 
-          {/* Agent message popover */}
           {selectedAgentId && (() => {
             const node = mindMapNodes.find((n) => n.id === selectedAgentId);
             const agent = node ? agentsByAssignment.get(node.id) : undefined;
@@ -973,9 +1000,9 @@ export const SwarmPanel: React.FC<SwarmPanelProps> = ({
                   >×</button>
                 </div>
                 {!agent ? (
-                  <p className="smm-agent-chat-notice">Agent hasn't launched yet — it will accept input once running.</p>
+                  <p className="smm-agent-chat-notice">Agent will accept input once launched.</p>
                 ) : FINISHED_STATUSES.has(agent.status) ? (
-                  <p className="smm-agent-chat-notice">Agent is {agent.status} and no longer accepting input.</p>
+                  <p className="smm-agent-chat-notice">Agent is {agent.status}.</p>
                 ) : (
                   <form
                     className="smm-agent-chat-form"
@@ -994,11 +1021,7 @@ export const SwarmPanel: React.FC<SwarmPanelProps> = ({
                       placeholder={`Message ${node.label}…`}
                       autoFocus
                     />
-                    <button
-                      type="submit"
-                      className="smm-agent-chat-send"
-                      disabled={!agentChatMsg.trim()}
-                    >Send</button>
+                    <button type="submit" className="smm-agent-chat-send" disabled={!agentChatMsg.trim()}>Send</button>
                   </form>
                 )}
               </div>
@@ -1009,206 +1032,192 @@ export const SwarmPanel: React.FC<SwarmPanelProps> = ({
         <div className="swarm-control-pane">
         <div className="swarm-scroll">
         <div className="swarm-planner">
+          {/* Goal input */}
           <div className="swarm-section">
-            <div className="swarm-section-head">
-              <h3>Mission</h3>
-              <span>{workerCount} workers + coordinator</span>
-            </div>
             <textarea
               className="swarm-goal-input"
               value={goal}
               onChange={(e) => setGoal(e.target.value)}
-              placeholder="Describe the product goal, bug, or feature. The coordinator will map the work, assign file ownership, launch workers, and drive review."
+              placeholder="Describe what you want the swarm to build, fix, or refactor…"
             />
-            <div className="swarm-config-row">
-              <div className="swarm-runtime-hint">
-                Coordinator uses {PROVIDERS.find((p) => p.id === coordinatorProvider)?.name || coordinatorProvider}. Workers launch with {selectedWorkerCLIOption.name} in this workspace with explicit ownership boundaries.
-              </div>
-              <div className="swarm-runtime-hint">
-                Recommended shape: 1 scout, 2 builders, 1 reviewer. Add more builders only when the work cleanly splits by files or modules.
-              </div>
-            </div>
           </div>
 
+          {/* Compact role steppers */}
           <div className="swarm-section">
-            <div className="swarm-section-head">
-              <h3>Worker Mix</h3>
-              <span>{workerCount}/{MAX_AGENTS} workers</span>
-            </div>
-            <div className="swarm-role-grid">
+            <div className="swarm-role-row">
               {ROLE_ORDER.map((role) => {
-                const roleDef = getRole(role);
                 const count = roleCounts[role];
                 const limits = ROLE_LIMITS[role];
                 const canDecrease = count > limits.min;
                 const canIncrease = count < limits.max && workerCount < MAX_AGENTS;
 
                 return (
-                  <div key={role} className="swarm-role-card selected">
-                    <div className="swarm-role-card-head">
-                      <div className="swarm-role-copy">
-                        <span className="swarm-role-name">{roleDef.name}</span>
-                        <span className="swarm-role-caption">{ROLE_COPY[role].caption}</span>
-                      </div>
-                      <div className="swarm-role-stepper">
-                        <button
-                          type="button"
-                          className="swarm-stepper-btn"
-                          onClick={() => adjustRoleCount(role, -1)}
-                          disabled={!canDecrease}
-                        >
-                          −
-                        </button>
-                        <span className="swarm-stepper-value">{count}</span>
-                        <button
-                          type="button"
-                          className="swarm-stepper-btn"
-                          onClick={() => adjustRoleCount(role, 1)}
-                          disabled={!canIncrease}
-                        >
-                          +
-                        </button>
-                      </div>
+                  <div key={role} className="swarm-role-compact">
+                    <div className="swarm-role-compact-info">
+                      <span className="smm-palette-dot" style={{ background: PALETTE_ROLE_COLORS[role] }} />
+                      <span className="swarm-role-compact-name">{role}</span>
                     </div>
-                    <span className="swarm-role-desc">{roleDef.description}</span>
-                    <span className="swarm-role-rule">{ROLE_COPY[role].hint}</span>
+                    <div className="swarm-role-stepper">
+                      <button
+                        type="button"
+                        className="swarm-stepper-btn"
+                        onClick={() => adjustRoleCount(role, -1)}
+                        disabled={!canDecrease}
+                      >−</button>
+                      <span className="swarm-stepper-value">{count}</span>
+                      <button
+                        type="button"
+                        className="swarm-stepper-btn"
+                        onClick={() => adjustRoleCount(role, 1)}
+                        disabled={!canIncrease}
+                      >+</button>
+                    </div>
                   </div>
                 );
               })}
             </div>
           </div>
 
-          <div className="swarm-section">
-            <div className="swarm-section-head">
-              <h3>Worker CLI</h3>
-              <span>{isCheckingWorkerCLI ? 'checking' : selectedWorkerCLIStatus?.available ? 'ready' : 'unavailable'}</span>
+          {/* Compact config selectors */}
+          <div className="swarm-compact-config">
+            <div className="swarm-config-select-group">
+              <label>Worker CLI</label>
+              <select
+                className="swarm-config-select"
+                value={workerCLI}
+                onChange={(e) => setWorkerCLI(e.target.value as WorkerCLI)}
+              >
+                {getWorkerCLIOptions().map((option) => {
+                  const status = workerCLIAvailability[option.id];
+                  return (
+                    <option key={option.id} value={option.id}>
+                      {option.name}{status?.available ? '' : ' (not installed)'}
+                    </option>
+                  );
+                })}
+              </select>
+              <span className={`swarm-config-badge ${selectedWorkerCLIStatus?.available ? 'ok' : 'warn'}`}>
+                {isCheckingWorkerCLI ? '…' : selectedWorkerCLIStatus?.available ? 'Ready' : 'Missing'}
+              </span>
             </div>
-            <div className="swarm-cli-grid">
-              {WORKER_CLI_OPTIONS.map((option) => {
-                const status = workerCLIAvailability[option.id];
-                const selected = workerCLI === option.id;
-
-                return (
-                  <button
-                    key={option.id}
-                    type="button"
-                    className={`swarm-cli-card ${selected ? 'selected' : ''}`}
-                    onClick={() => setWorkerCLI(option.id)}
-                  >
-                    <div className="swarm-cli-head">
-                      <span className="swarm-cli-name">{option.name}</span>
-                      <span className={`swarm-cli-badge ${status?.available ? 'available' : 'unavailable'}`}>
-                        {status?.available ? 'Installed' : 'Missing'}
-                      </span>
-                    </div>
-                    <span className="swarm-cli-command">{option.command}</span>
-                    <span className="swarm-cli-desc">{option.description}</span>
-                    <span className="swarm-cli-detail">{status?.detail || 'Checking availability…'}</span>
-                  </button>
-                );
-              })}
+            <div className="swarm-config-select-group">
+              <label>Coordinator</label>
+              <select
+                className="swarm-config-select"
+                value={coordinatorProvider}
+                onChange={(e) => handleCoordinatorProviderChange(e.target.value as ProviderID)}
+              >
+                {PROVIDERS.map((provider) => (
+                  <option key={provider.id} value={provider.id}>{provider.name}</option>
+                ))}
+              </select>
+              <span className={`swarm-config-badge ${hasCoordinatorKey ? 'ok' : 'warn'}`}>
+                {!requirementsLoaded ? '…' : hasCoordinatorKey ? 'Key set' : 'No key'}
+              </span>
             </div>
+            {coordinatorModels.length > 1 && (
+              <div className="swarm-config-select-group">
+                <label>Model</label>
+                <select
+                  className="swarm-config-select"
+                  value={effectiveCoordinatorModel}
+                  onChange={(e) => setCoordinatorModel(e.target.value)}
+                >
+                  {coordinatorModels.map((model) => (
+                    <option key={model} value={model}>{model}</option>
+                  ))}
+                </select>
+              </div>
+            )}
           </div>
 
-          <div className="swarm-section">
-            <div className="swarm-section-head">
-              <h3>Coordinator AI</h3>
-              <span>{requirementsLoaded ? (hasCoordinatorKey ? 'key ready' : 'no key') : 'checking'}</span>
-            </div>
-            <div className="swarm-cli-grid">
-              {PROVIDERS.map((provider) => {
-                const selected = coordinatorProvider === provider.id;
-                return (
-                  <button
-                    key={provider.id}
-                    type="button"
-                    className={`swarm-cli-card ${selected ? 'selected' : ''}`}
-                    onClick={() => handleCoordinatorProviderChange(provider.id)}
-                  >
-                    <div className="swarm-cli-head">
-                      <span className="swarm-cli-name">{provider.name}</span>
-                      {selected && (
-                        <span className={`swarm-cli-badge ${hasCoordinatorKey ? 'available' : 'unavailable'}`}>
-                          {hasCoordinatorKey ? 'Key set' : 'No key'}
-                        </span>
-                      )}
-                    </div>
-                    <span className="swarm-cli-desc">
-                      {provider.models.slice(0, 2).join(', ')}
-                    </span>
-                  </button>
-                );
-              })}
-            </div>
-            {(() => {
-              const models = PROVIDERS.find((p) => p.id === coordinatorProvider)?.models ?? [];
-              const effectiveModel = coordinatorModel || models[0] || '';
-              if (models.length === 0) return null;
-              return (
-                <div className="swarm-coordinator-model-row">
-                  <label className="swarm-coordinator-model-label">Model</label>
-                  <select
-                    className="swarm-coordinator-model-select"
-                    value={effectiveModel}
-                    onChange={(e) => setCoordinatorModel(e.target.value)}
-                  >
-                    {models.map((model) => (
-                      <option key={model} value={model}>{model}</option>
-                    ))}
-                  </select>
+          {/* Advanced config toggle */}
+          <button
+            type="button"
+            className="swarm-advanced-toggle"
+            onClick={() => setShowAdvancedConfig((v) => !v)}
+          >
+            {showAdvancedConfig ? 'Hide details' : 'Show details'}
+            <svg
+              xmlns="http://www.w3.org/2000/svg" width="10" height="10" viewBox="0 0 24 24"
+              fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"
+              style={{ transform: showAdvancedConfig ? 'rotate(180deg)' : undefined, transition: 'transform 0.15s' }}
+            >
+              <polyline points="6 9 12 15 18 9" />
+            </svg>
+          </button>
+
+          {showAdvancedConfig && (
+            <>
+              <div className="swarm-section">
+                <div className="swarm-section-head">
+                  <h3>Worker CLI</h3>
                 </div>
-              );
-            })()}
-          </div>
-
-          <div className="swarm-section">
-            <div className="swarm-section-head">
-              <h3>Operating Model</h3>
-              <span>Coordinator-enforced rules</span>
-            </div>
-            <div className="swarm-principles-grid">
-              {OPERATING_MODEL.map((principle, index) => (
-                <div key={principle} className="swarm-principle-card">
-                  <strong>{String(index + 1).padStart(2, '0')}</strong>
-                  <span>{principle}</span>
+                <div className="swarm-cli-grid">
+                  {getWorkerCLIOptions().map((option) => {
+                    const status = workerCLIAvailability[option.id];
+                    const selected = workerCLI === option.id;
+                    return (
+                      <button
+                        key={option.id}
+                        type="button"
+                        className={`swarm-cli-card ${selected ? 'selected' : ''}`}
+                        onClick={() => setWorkerCLI(option.id)}
+                      >
+                        <div className="swarm-cli-head">
+                          <span className="swarm-cli-name">{option.name}</span>
+                          <span className={`swarm-cli-badge ${status?.available ? 'available' : 'unavailable'}`}>
+                            {status?.available ? 'Installed' : 'Missing'}
+                          </span>
+                        </div>
+                        <span className="swarm-cli-command">{option.command}</span>
+                      </button>
+                    );
+                  })}
                 </div>
-              ))}
-            </div>
-          </div>
+              </div>
 
-          {!workspacePath && (
-            <div className="swarm-requirement warning">
-              Open a project first. The coordinator needs a workspace to assign ownership correctly.
-            </div>
+              <div className="swarm-section">
+                <div className="swarm-section-head">
+                  <h3>Coordinator AI</h3>
+                </div>
+                <div className="swarm-cli-grid">
+                  {PROVIDERS.map((provider) => {
+                    const selected = coordinatorProvider === provider.id;
+                    return (
+                      <button
+                        key={provider.id}
+                        type="button"
+                        className={`swarm-cli-card ${selected ? 'selected' : ''}`}
+                        onClick={() => handleCoordinatorProviderChange(provider.id)}
+                      >
+                        <div className="swarm-cli-head">
+                          <span className="swarm-cli-name">{provider.name}</span>
+                          {selected && (
+                            <span className={`swarm-cli-badge ${hasCoordinatorKey ? 'available' : 'unavailable'}`}>
+                              {hasCoordinatorKey ? 'Key set' : 'No key'}
+                            </span>
+                          )}
+                        </div>
+                        <span className="swarm-cli-desc">{provider.models[0]}</span>
+                      </button>
+                    );
+                  })}
+                </div>
+              </div>
+            </>
           )}
 
-          {!rolesReady && (
-            <div className="swarm-requirement warning">
-              Use at least {MIN_AGENTS} workers. A single worker is just a terminal session, not a swarm.
-            </div>
-          )}
-
-          {roleCounts.scout === 0 && (
-            <div className="swarm-requirement warning">
-              No scout selected. Builders will start without a dedicated discovery pass or ownership recommendations.
-            </div>
-          )}
-
-          {roleCounts.reviewer === 0 && (
-            <div className="swarm-requirement warning">
-              No reviewer selected. Completed work will have no dedicated quality gate before you ship it.
-            </div>
-          )}
-
+          {/* Warnings - only show actionable ones */}
           {requirementsLoaded && !hasCoordinatorKey && (
             <div className="swarm-requirement warning">
-              Add a {PROVIDERS.find((p) => p.id === coordinatorProvider)?.name || coordinatorProvider} API key in Settings. The coordinator needs this key to plan and sync the swarm.
+              Add a {coordinatorProviderName} API key in Settings to enable the coordinator.
             </div>
           )}
 
           {!isCheckingWorkerCLI && selectedWorkerCLIStatus && !selectedWorkerCLIStatus.available && (
             <div className="swarm-requirement warning">
-              {selectedWorkerCLIOption.name} is not available for worker sessions. Install `{selectedWorkerCLIOption.command}` or choose another CLI.
+              {selectedWorkerCLIOption.name} is not installed. Install <code>{selectedWorkerCLIOption.command}</code> or choose another CLI.
             </div>
           )}
 
@@ -1223,127 +1232,88 @@ export const SwarmPanel: React.FC<SwarmPanelProps> = ({
             <button className="swarm-primary-btn" onClick={handleLaunch} disabled={!canLaunch}>
               {isLaunching ? 'Launching…' : `Launch ${workerCount}-Worker Swarm`}
             </button>
-            <button
-              className="swarm-secondary-btn"
-              onClick={() => void handleCoordinatorSync('manual')}
-              disabled={!coordinatorPlan || agents.length === 0 || isSyncing}
-            >
-              {isSyncing ? 'Syncing…' : 'Coordinator Sync'}
-            </button>
-            <button
-              className="swarm-danger-btn"
-              onClick={handleKillAll}
-              disabled={agents.length === 0}
-            >
-              Kill All
-            </button>
           </div>
         </div>
 
-        <div className="swarm-status-strip">
-          <span>{statusLabel}</span>
-          <span>{runningCount} active · {agents.length} workers</span>
-        </div>
-
-        <div className="swarm-coordinator-board">
-          <div className="swarm-coordinator-card swarm-board-card">
-            <div className="swarm-section-head">
-              <h3>Coordination Board</h3>
-              <span>{coordinatorPlan ? 'live' : 'template'}</span>
+        {/* Coordination Board - visible after plan exists or as preview */}
+        {(coordinatorPlan || agents.length > 0) && (
+          <>
+            <div className="swarm-status-strip">
+              <span>{statusLabel}</span>
+              <span>{runningCount} active · {agents.length} workers</span>
             </div>
-            <div className="swarm-board-summary">
-              <strong>{coordinatorPlan ? `Active Swarm — ${workspaceName}` : `Swarm Template — ${workspaceName}`}</strong>
-              <p>
-                {activeGoal || 'Define a goal and launch the coordinator. This board previews how the swarm will split work across scout, builders, and reviewer.'}
-              </p>
-            </div>
-            <div className="swarm-board-list">
-              {boardAssignments.map((assignment) => {
-                const agent = agentsByAssignment.get(assignment.id);
-                const state = getAssignmentState(assignment, agent);
-                const ownershipSummary = assignment.ownedFiles.length > 0
-                  ? `${assignment.ownedFiles.length} ownership item${assignment.ownedFiles.length === 1 ? '' : 's'}`
-                  : 'Ownership pending';
-                const dependencySummary = assignment.dependencies.length > 0
-                  ? `${assignment.dependencies.length} dep${assignment.dependencies.length === 1 ? '' : 's'}`
-                  : 'No deps';
-                const ownershipPreview = assignment.ownedFiles.length > 0
-                  ? assignment.ownedFiles.slice(0, 2).join(', ')
-                  : 'Coordinator will assign files or modules at launch';
 
-                return (
-                  <div key={assignment.id} className="swarm-board-row">
-                    <span className={`swarm-task-status ${state.tone}`}>{state.label}</span>
-                    <div className="swarm-task-main">
-                      <div className="swarm-task-head">
-                        <strong>{assignment.label}</strong>
-                        <span>{getRole(assignment.role).name}</span>
+            <div className="swarm-coordinator-board">
+              <div className="swarm-coordinator-card swarm-board-card">
+                <div className="swarm-section-head">
+                  <h3>Board</h3>
+                  <span>{coordinatorPlan ? 'live' : 'template'}</span>
+                </div>
+                <div className="swarm-board-list">
+                  {boardAssignments.map((assignment) => {
+                    const agent = agentsByAssignment.get(assignment.id);
+                    const state = getAssignmentState(assignment, agent);
+                    return (
+                      <div key={assignment.id} className="swarm-board-row">
+                        <span className={`swarm-task-status ${state.tone}`}>{state.label}</span>
+                        <div className="swarm-task-main">
+                          <div className="swarm-task-head">
+                            <strong>{assignment.label}</strong>
+                            <span>{getRole(assignment.role).name}</span>
+                          </div>
+                          <p>{assignment.task}</p>
+                          {assignment.ownedFiles.length > 0 && (
+                            <div className="swarm-task-meta">
+                              <span>{assignment.ownedFiles.length} file{assignment.ownedFiles.length === 1 ? '' : 's'}</span>
+                              <span>{assignment.ownedFiles.slice(0, 2).join(', ')}</span>
+                            </div>
+                          )}
+                        </div>
                       </div>
-                      <p>{assignment.task}</p>
-                      <div className="swarm-task-meta">
-                        <span>{ownershipSummary}</span>
-                        <span>{dependencySummary}</span>
+                    );
+                  })}
+                </div>
+              </div>
+
+              <div className="swarm-coordinator-stack">
+                {coordinatorPlan && (
+                  <div className="swarm-coordinator-card">
+                    <div className="swarm-section-head">
+                      <h3>Strategy</h3>
+                    </div>
+                    <p className="swarm-coordinator-summary">{coordinatorPlan.strategy}</p>
+                    {lastSync && (
+                      <div className="swarm-plan-snippet">
+                        <strong>Next</strong>
+                        <p>{lastSync.nextMilestone}</p>
                       </div>
-                      <div className="swarm-task-ownership">{ownershipPreview}</div>
+                    )}
+                  </div>
+                )}
+
+                {coordinatorLog.length > 0 && (
+                  <div className="swarm-coordinator-card swarm-coordinator-log">
+                    <div className="swarm-section-head">
+                      <h3>Log</h3>
+                      <span>{coordinatorLog.length}</span>
+                    </div>
+                    <div className="swarm-log-list">
+                      {coordinatorLog.map((entry) => (
+                        <div key={entry.id} className={`swarm-log-entry ${entry.kind}`}>
+                          <span className="swarm-log-time">{formatTimestamp(entry.timestamp)}</span>
+                          <div className="swarm-log-copy">
+                            <strong>{entry.kind}</strong>
+                            <span>{entry.message}</span>
+                          </div>
+                        </div>
+                      ))}
                     </div>
                   </div>
-                );
-              })}
-            </div>
-          </div>
-
-          <div className="swarm-coordinator-stack">
-            <div className="swarm-coordinator-card">
-              <div className="swarm-section-head">
-                <h3>Coordinator</h3>
-                <span>{lastSync?.overallStatus || (coordinatorPlan ? 'active' : 'ready')}</span>
+                )}
               </div>
-              <p className="swarm-coordinator-summary">
-                {lastSync?.summary || coordinatorPlan?.summary || 'The coordinator will split the mission into owned work lanes, monitor progress, and push completed slices through review.'}
-              </p>
-              {coordinatorPlan && (
-                <div className="swarm-plan-snippet">
-                  <strong>Strategy</strong>
-                  <p>{coordinatorPlan.strategy}</p>
-                </div>
-              )}
-              {coordinatorPlan && (
-                <div className="swarm-plan-snippet">
-                  <strong>Watch</strong>
-                  <p>{coordinatorPlan.coordinatorBrief}</p>
-                </div>
-              )}
-              {lastSync && (
-                <div className="swarm-plan-snippet">
-                  <strong>Next Milestone</strong>
-                  <p>{lastSync.nextMilestone}</p>
-                </div>
-              )}
             </div>
-
-            <div className="swarm-coordinator-card swarm-coordinator-log">
-              <div className="swarm-section-head">
-                <h3>Coordinator Log</h3>
-                <span>{coordinatorLog.length} events</span>
-              </div>
-              {coordinatorLog.length === 0 ? (
-                <p className="swarm-coordinator-summary">No coordinator activity yet.</p>
-              ) : (
-                <div className="swarm-log-list">
-                  {coordinatorLog.map((entry) => (
-                    <div key={entry.id} className={`swarm-log-entry ${entry.kind}`}>
-                      <span className="swarm-log-time">{formatTimestamp(entry.timestamp)}</span>
-                      <div className="swarm-log-copy">
-                        <strong>{entry.kind}</strong>
-                        <span>{entry.message}</span>
-                      </div>
-                    </div>
-                  ))}
-                </div>
-              )}
-            </div>
-          </div>
-        </div>
+          </>
+        )}
 
         <div className="agents-list">
           {agents.length === 0 ? (
@@ -1351,7 +1321,7 @@ export const SwarmPanel: React.FC<SwarmPanelProps> = ({
               <div className="agents-empty-icon">⬡</div>
               <p>No swarm running</p>
               <p className="agents-empty-sub">
-                Launch the coordinator with scouts, builders, and a reviewer to get owned work lanes instead of one monolithic agent session.
+                Describe a goal above and launch. The coordinator will split work across scouts, builders, and reviewers with file ownership.
               </p>
             </div>
           ) : (
