@@ -137,6 +137,23 @@
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
+}
+
+.agent-failure-reason {
+  padding: 6px 10px;
+  font-size: 11px;
+  color: #b91c1c;
+  background: #fef2f2;
+  border-bottom: 1px solid #fecaca;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.dark .agent-failure-reason {
+  color: #fca5a5;
+  background: rgba(153, 27, 27, 0.15);
+  border-bottom-color: rgba(153, 27, 27, 0.3);
   flex-shrink: 0;
 }
 

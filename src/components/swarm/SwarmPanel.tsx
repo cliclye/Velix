@@ -198,12 +198,15 @@ const getAssignmentState = (
     return { label: 'DONE', tone: 'done' };
   }
 
-  if (
-    agent.status === 'failed' ||
-    agent.status === 'terminated' ||
-    agent.status === 'waiting_for_input' ||
-    agent.status === 'waiting_for_approval'
-  ) {
+  if (agent.status === 'failed') {
+    return { label: 'FAILED', tone: 'blocked' };
+  }
+
+  if (agent.status === 'terminated') {
+    return { label: 'STOPPED', tone: 'blocked' };
+  }
+
+  if (agent.status === 'waiting_for_input' || agent.status === 'waiting_for_approval') {
     return { label: 'BLOCKED', tone: 'blocked' };
   }
 
@@ -353,6 +356,8 @@ export const SwarmPanel: React.FC<SwarmPanelProps> = ({
     buildDefaultWorkerCLIAvailability,
   );
   const [isCheckingWorkerCLI, setIsCheckingWorkerCLI] = useState(false);
+  /** PTY event listeners registered — avoids launching before AgentManager can receive output. */
+  const [swarmPtyReady, setSwarmPtyReady] = useState(false);
   const [expandedAgentId, setExpandedAgentId] = useState<string | null>(null);
   const [isLaunching, setIsLaunching] = useState(false);
   const [isSyncing, setIsSyncing] = useState(false);
@@ -437,22 +442,28 @@ export const SwarmPanel: React.FC<SwarmPanelProps> = ({
   }, [coordinatorModel]);
 
   useEffect(() => {
-    if (!isOpen || !workspacePath) return;
+    if (!isOpen || !workspacePath) {
+      setSwarmPtyReady(false);
+      return;
+    }
 
     const manager = new AgentManager(new SwarmEventEmitter(), workspacePath);
     manager.setWorkerCLI(workerCLI);
     managerRef.current = manager;
 
     let disposed = false;
+    setSwarmPtyReady(false);
 
     manager.initialize()
       .then(() => {
         if (!disposed) {
+          setSwarmPtyReady(true);
           refreshAgents();
         }
       })
       .catch((err) => {
         if (!disposed) {
+          setSwarmPtyReady(false);
           setError(`Failed to initialize swarm worker manager: ${err}`);
         }
       });
@@ -477,6 +488,7 @@ export const SwarmPanel: React.FC<SwarmPanelProps> = ({
 
     return () => {
       disposed = true;
+      setSwarmPtyReady(false);
       stopAutoSync();
       void manager.terminateAll('Swarm panel closed').catch(() => {});
       void manager.cleanup();
@@ -647,6 +659,14 @@ export const SwarmPanel: React.FC<SwarmPanelProps> = ({
       setError('Open a project before launching a swarm.');
       return;
     }
+
+    try {
+      await manager.initialize();
+    } catch (initErr) {
+      const msg = initErr instanceof Error ? initErr.message : String(initErr);
+      setError(`Swarm PTY layer is not ready: ${msg}`);
+      return;
+    }
     if (!hasCoordinatorKey) {
       const providerName = PROVIDERS.find((p) => p.id === coordinatorProvider)?.name || coordinatorProvider;
       setError(`Swarm coordinator requires a ${providerName} API key in Settings.`);
@@ -797,7 +817,9 @@ export const SwarmPanel: React.FC<SwarmPanelProps> = ({
         passAllContext?: boolean,
       ): Promise<string[]> => {
         const agentIds: string[] = [];
-        await Promise.all(assignments.map(async (assignment) => {
+        await Promise.all(assignments.map(async (assignment, index) => {
+          // Stagger PTY spawns slightly to avoid macOS/login-shell races when many agents start at once.
+          await new Promise((r) => setTimeout(r, index * 150));
           const role = getRole(assignment.role);
 
           // Use task override (revision) or build normal worker task with dependency context
@@ -835,14 +857,59 @@ export const SwarmPanel: React.FC<SwarmPanelProps> = ({
         return agentIds;
       };
 
-      // --- Phase 1: Scout wave (research) ---
+      // --- Phase 1: Scout wave (hybrid: API research + CLI analysis) ---
       const scoutAssignments = plan.assignments.filter((a) => a.role === 'scout');
       if (scoutAssignments.length > 0) {
-        setStatusLabel('Scout Mapping');
-        const scoutIds = await spawnWave(scoutAssignments);
+        // Phase 1a: External research via API (parallel for all scouts)
+        setStatusLabel('Scout Research (API)');
+        const scoutApiResearch = new Map<string, string>();
+        await Promise.all(scoutAssignments.map(async (assignment) => {
+          try {
+            appendLog('dispatch', `Scout ${assignment.label}: running external research via API…`);
+            const research = await claudeCoordinator.scoutResearch(
+              trimmedGoal, assignment.task, coordinatorConfig, maxMode,
+            );
+            scoutApiResearch.set(assignment.label, research);
+            appendLog('dispatch', `Scout ${assignment.label}: external research complete.`);
+          } catch (err) {
+            const msg = err instanceof Error ? err.message : String(err);
+            appendLog('error', `Scout ${assignment.label} API research failed: ${msg}`);
+          }
+        }));
+        if (abort.signal.aborted) return;
+
+        // Phase 1b: Internal analysis via CLI — inject API research as context
+        setStatusLabel('Scout Mapping (CLI)');
+        const scoutTaskOverrides = new Map<string, string>();
+        for (const assignment of scoutAssignments) {
+          const apiResearch = scoutApiResearch.get(assignment.label);
+          if (apiResearch) {
+            const baseTask = claudeCoordinator.buildWorkerTask(
+              trimmedGoal, plan, assignment, undefined, maxMode,
+            );
+            scoutTaskOverrides.set(
+              assignment.label,
+              baseTask
+                + '\n\n--- External Research Context (from API) ---\n'
+                + apiResearch
+                + '\n--- End External Research ---\n\n'
+                + 'Use the above external research to inform your codebase analysis. '
+                + 'Focus on internal code paths, file structure, and risks specific to this project.',
+            );
+          }
+        }
+
+        const scoutIds = await spawnWave(
+          scoutAssignments,
+          scoutTaskOverrides.size > 0 ? scoutTaskOverrides : undefined,
+        );
         const scoutOutputs = await waitForAgents(scoutIds);
         if (abort.signal.aborted) return;
-        for (const [label, output] of scoutOutputs) swarmState.research.set(label, output);
+
+        for (const [label, cliOutput] of scoutOutputs) {
+          const apiOutput = scoutApiResearch.get(label) || '';
+          swarmState.research.set(label, apiOutput ? `${apiOutput}\n\n---\n\n${cliOutput}` : cliOutput);
+        }
         appendLog('dispatch', `Scout wave complete: ${scoutAssignments.map((a) => a.label).join(', ')}`);
         refreshAgents();
       } else {
@@ -874,11 +941,10 @@ export const SwarmPanel: React.FC<SwarmPanelProps> = ({
         const isRevision = iteration > 1;
 
         // --- Phase 2: Builder wave ---
-        setStatusLabel(isRevision ? `Builder Revision ${iteration}` : 'Builders Working');
+        setStatusLabel(isRevision ? `Launching Builder Revision ${iteration}` : 'Launching Builders');
 
         let builderTaskOverrides: Map<string, string> | undefined;
         if (isRevision && lastRevisionInstructions) {
-          // Build revision tasks from coordinator-compiled revision instructions
           builderTaskOverrides = new Map();
           for (const assignment of builderAssignments) {
             const prevOutput = swarmState.artifacts.get(assignment.label) || '';
@@ -891,6 +957,7 @@ export const SwarmPanel: React.FC<SwarmPanelProps> = ({
         }
 
         const builderIds = await spawnWave(builderAssignments, builderTaskOverrides, allResearch, false);
+        setStatusLabel(isRevision ? `Builder Revision ${iteration}` : 'Builders Working');
         const builderOutputs = await waitForAgents(builderIds);
         for (const [label, output] of builderOutputs) swarmState.artifacts.set(label, output);
         appendLog('dispatch', `Builder wave complete: ${builderAssignments.map((a) => a.label).join(', ')}`);
@@ -903,11 +970,11 @@ export const SwarmPanel: React.FC<SwarmPanelProps> = ({
           break;
         }
 
-        setStatusLabel('Reviewer Evaluating');
+        setStatusLabel('Launching Reviewers');
 
-        // Reviewers get both scout research and builder artifacts as dependency context
         const reviewerContext = new Map<string, string>([...allResearch, ...swarmState.artifacts]);
         const reviewerIds = await spawnWave(reviewerAssignments, undefined, reviewerContext, true);
+        setStatusLabel('Reviewers Evaluating');
         const reviewerOutputs = await waitForAgents(reviewerIds);
         for (const [label, output] of reviewerOutputs) swarmState.reviews.set(label, output);
         appendLog('dispatch', `Reviewer wave complete: ${reviewerAssignments.map((a) => a.label).join(', ')}`);
@@ -1059,8 +1126,9 @@ export const SwarmPanel: React.FC<SwarmPanelProps> = ({
     rolesReady &&
     !isCheckingWorkerCLI &&
     selectedWorkerCLIStatus?.available &&
+    swarmPtyReady &&
     !isLaunching,
-  ), [goal, workspacePath, hasCoordinatorKey, rolesReady, isCheckingWorkerCLI, selectedWorkerCLIStatus, isLaunching]);
+  ), [goal, workspacePath, hasCoordinatorKey, rolesReady, isCheckingWorkerCLI, selectedWorkerCLIStatus, swarmPtyReady, isLaunching]);
   const workspaceName = useMemo(() => workspacePath ? getWorkspaceName(workspacePath) : 'workspace', [workspacePath]);
   const previewAssignments = useMemo(() => buildPreviewAssignments(rolesToLaunch), [rolesToLaunch]);
   const boardAssignmentsBase = useMemo(
@@ -1082,14 +1150,16 @@ export const SwarmPanel: React.FC<SwarmPanelProps> = ({
 
   const mindMapNodes = useMemo<MindMapNode[]>(() => boardAssignments.map((assignment) => {
     const agent = agentsByAssignment.get(assignment.id);
-    const { label, tone } = getAssignmentState(assignment, agent);
+    const { label: statusLabel_, tone } = getAssignmentState(assignment, agent);
     return {
       id: assignment.id,
       label: assignment.label,
       role: assignment.role,
       tone,
-      statusLabel: label,
-      workingOn: buildWorkSummary(agent?.assignedTask || assignment.task, assignment.role as SwarmLaunchRole),
+      statusLabel: statusLabel_,
+      workingOn: agent?.failureReason && (agent.status === 'failed' || agent.status === 'terminated')
+        ? agent.failureReason
+        : buildWorkSummary(agent?.assignedTask || assignment.task, assignment.role as SwarmLaunchRole),
       position: nodePositions[assignment.id],
     };
   }), [boardAssignments, agentsByAssignment, nodePositions]);
@@ -1259,7 +1329,7 @@ export const SwarmPanel: React.FC<SwarmPanelProps> = ({
             nodes={mindMapNodes}
             connections={mindMapConnections}
             coordinatorStatus={statusLabel}
-            isActive={Boolean(coordinatorPlan) || agents.length > 0}
+            isActive={isLaunching || isSyncing}
             onAgentClick={(nodeId) => setSelectedAgentId((prev) => prev === nodeId ? null : nodeId)}
             selectedNodeId={selectedAgentId}
             onNodeMove={handleMindMapNodeMove}
@@ -1304,12 +1374,41 @@ export const SwarmPanel: React.FC<SwarmPanelProps> = ({
                     agent={agent}
                     theme={theme}
                     className="smm-agent-terminal"
-                    emptyText="Waiting for output…"
+                    emptyText={`${selectedWorkerCLIOption.name} — waiting for output…`}
                     interactive={!FINISHED_STATUSES.has(agent.status)}
                     resizeSession
                     autoFocus
                     onWriteInput={handleWriteInput}
                   />
+                )}
+
+                {agent && (
+                  <div className="smm-agent-checklist">
+                    <div className="smm-check-item done">
+                      <span className="smm-check-icon">✓</span>
+                      <span>Task prepared</span>
+                    </div>
+                    <div className={`smm-check-item${agent.cliLaunched ? ' done' : ''}`}>
+                      <span className="smm-check-icon">{agent.cliLaunched ? '✓' : '○'}</span>
+                      <span>CLI opened</span>
+                    </div>
+                    <div className={`smm-check-item${agent.promptDelivered ? ' done' : ''}`}>
+                      <span className="smm-check-icon">{agent.promptDelivered ? '✓' : '○'}</span>
+                      <span>Prompt sent</span>
+                    </div>
+                    {FINISHED_STATUSES.has(agent.status) && !agent.failureReason && (
+                      <div className="smm-check-item done">
+                        <span className="smm-check-icon">✓</span>
+                        <span>Work complete</span>
+                      </div>
+                    )}
+                    {agent.failureReason && (
+                      <div className="smm-check-item fail">
+                        <span className="smm-check-icon">✗</span>
+                        <span>{agent.failureReason}</span>
+                      </div>
+                    )}
+                  </div>
                 )}
 
                 {!agent ? (
@@ -1541,6 +1640,10 @@ export const SwarmPanel: React.FC<SwarmPanelProps> = ({
             </div>
           )}
 
+          {workspacePath && !swarmPtyReady && !isLaunching && (
+            <div className="swarm-requirement">Preparing worker terminals…</div>
+          )}
+
           <div className="swarm-max-mode-row">
             <label className="swarm-max-mode-toggle">
               <input
@@ -1667,6 +1770,7 @@ export const SwarmPanel: React.FC<SwarmPanelProps> = ({
                 key={agent.id}
                 agent={agent}
                 theme={theme}
+                workerCliLabel={selectedWorkerCLIOption.name}
                 onKill={handleKill}
                 onSendInput={handleSendInput}
                 expanded={expandedAgentId === agent.id}

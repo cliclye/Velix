@@ -1,5 +1,5 @@
 /**
- * AgentTerminal - Interactive terminal card for a single CLI Claude agent
+ * AgentTerminal — interactive terminal card for one swarm worker (any configured CLI).
  */
 
 import React, { useState } from 'react';
@@ -10,6 +10,8 @@ import './AgentTerminal.css';
 interface AgentTerminalProps {
   agent: Agent;
   theme: 'light' | 'dark';
+  /** Display name of the worker CLI (e.g. "Gemini CLI") — shown while waiting for PTY output */
+  workerCliLabel?: string;
   onKill: (agentId: string) => void;
   onSendInput: (agentId: string, data: string) => void;
   expanded: boolean;
@@ -19,6 +21,7 @@ interface AgentTerminalProps {
 export const AgentTerminal: React.FC<AgentTerminalProps> = ({
   agent,
   theme,
+  workerCliLabel = 'Worker CLI',
   onKill,
   onSendInput,
   expanded,
@@ -43,13 +46,13 @@ export const AgentTerminal: React.FC<AgentTerminalProps> = ({
 
   const getStatusColor = () => {
     switch (agent.status) {
-      case 'running': return 'var(--text-primary)';
+      case 'running': return '#22c55e';
       case 'waiting_for_input':
-      case 'waiting_for_approval': return 'var(--text-muted)';
-      case 'completed': return 'var(--accent-primary)';
-      case 'failed':
-      case 'terminated': return 'var(--border-default)';
-      default: return 'var(--text-hint)';
+      case 'waiting_for_approval': return '#eab308';
+      case 'completed': return '#16a34a';
+      case 'failed': return '#ef4444';
+      case 'terminated': return '#f97316';
+      default: return '#a3a3a3';
     }
   };
 
@@ -85,7 +88,10 @@ export const AgentTerminal: React.FC<AgentTerminalProps> = ({
     agent.status === 'terminated';
 
   return (
-    <div className={`agent-terminal ${theme} ${expanded ? 'expanded' : ''} ${isFinished ? 'finished' : ''}`}>
+    <div
+      className={`agent-terminal ${theme} ${expanded ? 'expanded' : ''} ${isFinished ? 'finished' : ''}`}
+      style={{ borderColor: getStatusColor(), borderLeftWidth: 3 }}
+    >
       <div className="terminal-header">
         <div className="terminal-title">
           <div className="status-dot" style={{ backgroundColor: getStatusColor() }} />
@@ -123,13 +129,18 @@ export const AgentTerminal: React.FC<AgentTerminalProps> = ({
           {ownershipSummary}
         </div>
       )}
+      {agent.failureReason && (agent.status === 'failed' || agent.status === 'terminated') && (
+        <div className="agent-failure-reason" title={agent.failureReason}>
+          {agent.failureReason}
+        </div>
+      )}
 
       {expanded && (
         <SwarmPtyTerminal
           agent={agent}
           theme={theme}
           className="terminal-window"
-          emptyText={`Launching Claude Code for ${displayName}...`}
+          emptyText={`Starting ${workerCliLabel} for ${displayName}…`}
         />
       )}
 

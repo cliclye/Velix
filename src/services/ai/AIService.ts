@@ -264,15 +264,15 @@ Just the raw code.`,
      */
     async generateAutomationPrompts(goal: string, count: number): Promise<string[]> {
         const raw = await this.oneShotChat(
-            `You are a task coordinator for a multi-agent coding workflow. Given a high-level goal, you generate exactly N distinct, focused prompts. Each prompt should be for a different Claude Code agent instance. Prompts should:
+            `You are a task coordinator for a multi-agent coding workflow. Given a high-level goal, you generate exactly N distinct, focused prompts. Each prompt should be for a different terminal coding CLI session (e.g. Claude Code, Gemini CLI, Codex). Prompts should:
 - Be specific and actionable
 - Cover different aspects or subtasks of the overall goal
 - Not overlap significantly with each other
 - Be 1-3 sentences each
-- Be suitable to paste directly into Claude Code as the initial instruction
+- Be suitable to paste as the initial instruction to an interactive coding agent in the terminal
 
 Return ONLY a JSON array of exactly ${count} strings. No markdown, no explanation. Example: ["prompt 1", "prompt 2"]`,
-            `Goal: ${goal}\n\nGenerate exactly ${count} distinct prompts for ${count} Claude Code agents. Return a JSON array only.`
+            `Goal: ${goal}\n\nGenerate exactly ${count} distinct prompts for ${count} separate terminal agent sessions. Return a JSON array only.`
         );
 
         let content = raw.trim();

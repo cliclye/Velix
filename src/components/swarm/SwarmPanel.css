@@ -1202,16 +1202,17 @@
 }
 
 .smm-agent-node.smm-running .smm-agent-card-shell {
+  border-color: var(--status-color);
   box-shadow:
     0 18px 34px rgba(0, 0, 0, 0.12),
     0 0 0 1px color-mix(in srgb, var(--status-color) 34%, transparent);
 }
 
 .smm-agent-node.smm-selected .smm-agent-card-shell {
-  border-color: var(--accent-primary);
+  border-color: var(--status-color);
   box-shadow:
     0 22px 40px rgba(0, 0, 0, 0.16),
-    0 0 0 2px color-mix(in srgb, var(--accent-primary) 28%, transparent);
+    0 0 0 2px color-mix(in srgb, var(--status-color) 28%, transparent);
 }
 
 .smm-agent-card-shell {
@@ -1222,9 +1223,9 @@
   gap: 4px;
   padding: 12px 14px;
   border-radius: 16px;
-  border: 1px solid color-mix(in srgb, var(--role-color) 34%, var(--border-default));
+  border: 1.5px solid color-mix(in srgb, var(--status-color) 50%, var(--border-default));
   background:
-    linear-gradient(135deg, color-mix(in srgb, var(--role-color) 14%, var(--bg-secondary)) 0%, var(--bg-secondary) 36%, var(--bg-primary) 100%);
+    linear-gradient(135deg, color-mix(in srgb, var(--status-color) 6%, var(--bg-secondary)) 0%, var(--bg-secondary) 36%, var(--bg-primary) 100%);
   box-shadow: 0 14px 28px rgba(0, 0, 0, 0.1);
   overflow: hidden;
 }
@@ -1234,7 +1235,7 @@
   position: absolute;
   inset: 0 auto 0 0;
   width: 4px;
-  background: linear-gradient(180deg, var(--role-color) 0%, color-mix(in srgb, var(--role-color) 30%, transparent) 100%);
+  background: linear-gradient(180deg, var(--status-color) 0%, color-mix(in srgb, var(--status-color) 30%, transparent) 100%);
 }
 
 .smm-agent-node-head {
@@ -1654,6 +1655,46 @@
 
 .smm-agent-terminal .swarm-pty-terminal {
   height: 100%;
+}
+
+.smm-agent-checklist {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 8px 14px;
+  border-bottom: 1px solid var(--border-default);
+}
+
+.smm-check-item {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 11px;
+  color: var(--text-muted);
+  line-height: 1.6;
+}
+
+.smm-check-item.done {
+  color: var(--text-secondary);
+}
+
+.smm-check-item.fail {
+  color: #b91c1c;
+}
+
+.dark .smm-check-item.fail {
+  color: #fca5a5;
+}
+
+.smm-check-icon {
+  width: 14px;
+  text-align: center;
+  font-size: 12px;
+  flex-shrink: 0;
+}
+
+.smm-check-item.done .smm-check-icon {
+  color: var(--accent-primary);
 }
 
 .smm-agent-chat-notice {

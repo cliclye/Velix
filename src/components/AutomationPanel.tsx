@@ -2,7 +2,20 @@ import React, { useState, useCallback } from 'react';
 import '../styles/AutomationPanel.css';
 import { aiService } from '../services/ai/AIService';
 import { PROVIDERS } from '../services/ai/types';
+import { getWorkerCLIOptions } from '../services/swarm';
 import { TerminalRef } from './TerminalBlock';
+
+/** Same key as Swarm — whichever worker CLI is selected there is used for automation dispatch. */
+const WORKER_CLI_STORAGE_KEY = 'velix-swarm-worker-cli';
+
+function resolveAutomationCliCommand(): string {
+  if (typeof window === 'undefined') return 'claude';
+  const stored = window.localStorage.getItem(WORKER_CLI_STORAGE_KEY);
+  const options = getWorkerCLIOptions();
+  const byId = stored ? options.find((o) => o.id === stored) : undefined;
+  const fallback = options.find((o) => o.id === 'claude') ?? options[0];
+  return (byId ?? fallback)?.command ?? 'claude';
+}
 
 interface TerminalTab {
   id: string;
@@ -128,7 +141,8 @@ export const AutomationPanel: React.FC<AutomationPanelProps> = ({
 
       try {
         const escaped = subtask.prompt.replace(/'/g, "'\\''");
-        terminalRef.write(`claude '${escaped}'\r`);
+        const cmd = resolveAutomationCliCommand();
+        terminalRef.write(`${cmd} '${escaped}'\r`);
         newStatus[subtask.id] = 'dispatched';
       } catch {
         newStatus[subtask.id] = 'error';
@@ -153,7 +167,8 @@ export const AutomationPanel: React.FC<AutomationPanelProps> = ({
       const ref = terminalRefs.current.get(tab.id);
       if (ref) {
         const escaped = goal.trim().replace(/'/g, "'\\''");
-        ref.write(`claude '${escaped}'\r`);
+        const cmd = resolveAutomationCliCommand();
+        ref.write(`${cmd} '${escaped}'\r`);
         await new Promise(resolve => setTimeout(resolve, 200));
       }
     }
@@ -175,7 +190,7 @@ export const AutomationPanel: React.FC<AutomationPanelProps> = ({
   return (
     <div className={`automation-panel ${theme}`}>
       <div className="automation-header">
-        <h2>Claude Code Controller</h2>
+        <h2>Terminal automation</h2>
         <button className="close-btn" onClick={onClose}>×</button>
       </div>
 

@@ -1,5 +1,5 @@
 /**
- * Claude-Swarm - Multi-agent orchestration system
+ * Swarm — multi-agent orchestration for worker CLIs
  * Barrel exports for the swarm module
  */
 
@@ -8,7 +8,15 @@ export * from './types';
 
 // Core components
 export { OrchestratorCore, orchestrator } from './OrchestratorCore';
-export { AgentManager, WORKER_CLI_OPTIONS, getWorkerCLIOptions, loadCustomCLIOptions, saveCustomCLIOptions, detectWorkerCLIAvailability } from './AgentManager';
+export {
+  AgentManager,
+  WORKER_CLI_OPTIONS,
+  getWorkerCLIOptions,
+  getCliReadyPatterns,
+  loadCustomCLIOptions,
+  saveCustomCLIOptions,
+  detectWorkerCLIAvailability,
+} from './AgentManager';
 export type { WorkerCLIOption } from './AgentManager';
 export { SwarmEventEmitter, swarmEvents } from './SwarmEventEmitter';
 

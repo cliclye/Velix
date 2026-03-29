@@ -38,12 +38,12 @@ interface SwarmMindMapProps {
 }
 
 const TONE_COLORS: Record<NodeTone, string> = {
-  queued: 'var(--text-hint)',
-  mapping: 'var(--text-muted)',
-  building: 'var(--text-secondary)',
-  review: 'var(--accent-primary-dark)',
-  done: 'var(--accent-primary)',
-  blocked: 'var(--border-default)',
+  queued: '#a3a3a3',
+  mapping: '#eab308',
+  building: '#22c55e',
+  review: '#3b82f6',
+  done: '#16a34a',
+  blocked: '#ef4444',
 };
 
 const ROLE_COLORS: Record<string, string> = {
@@ -661,6 +661,14 @@ export const SwarmMindMap: React.FC<SwarmMindMapProps> = ({
         {resolvedNodes.map((node) => {
           const isSelected = node.id === selectedNodeId;
           const isRunning = node.tone !== 'queued' && node.tone !== 'done' && node.tone !== 'blocked';
+          const captionSub =
+            node.tone === 'done'
+              ? 'Completed'
+              : node.tone === 'blocked'
+                ? (node.statusLabel === 'FAILED' || node.statusLabel === 'STOPPED'
+                    ? 'Ended'
+                    : 'Needs attention')
+                : 'Awaiting launch';
           const title = node.workingOn
             ? `${node.label}: ${node.workingOn}`
             : node.label;
@@ -717,9 +725,12 @@ export const SwarmMindMap: React.FC<SwarmMindMapProps> = ({
                 </div>
 
                 <strong className="smm-agent-node-title">{truncateText(node.label, 24)}</strong>
-                <span className="smm-agent-node-caption">{isRunning ? 'Working on' : node.tone === 'done' ? 'Completed' : 'Awaiting launch'}</span>
+                <span className="smm-agent-node-caption">{isRunning ? 'Working on' : captionSub}</span>
                 <span className="smm-agent-node-work">
-                  {truncateText(node.workingOn || 'Awaiting launch', 32)}
+                  {truncateText(
+                    node.workingOn || (node.tone === 'blocked' ? node.statusLabel || '—' : 'Awaiting launch'),
+                    32,
+                  )}
                 </span>
               </div>
             </div>

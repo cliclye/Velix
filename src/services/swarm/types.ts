@@ -1,6 +1,6 @@
 /**
- * Claude-Swarm Type Definitions
- * Multi-agent orchestration system for automating Claude Code sessions
+ * Swarm type definitions — multi-agent orchestration for coding worker CLIs
+ * (Claude Code, Gemini CLI, Codex, Copilot, Velix, custom commands, etc.).
  */
 
 // ============= Orchestrator States =============
@@ -101,6 +101,10 @@ export interface Agent {
   terminalOutput: string; // Raw PTY stream used for terminal replay
   metrics: AgentMetrics;
   promptFilePath?: string; // Temp file containing the full prompt for this agent
+  failureReason?: string; // Human-readable explanation when status is 'failed'
+  promptFileWritten?: boolean;
+  cliLaunched?: boolean;
+  promptDelivered?: boolean;
 }
 
 export interface AgentAssignment {

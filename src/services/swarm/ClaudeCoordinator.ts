@@ -468,6 +468,42 @@ export class ClaudeCoordinator {
     }
   }
 
+  /**
+   * Scout external research via API — gathers best practices, comparisons,
+   * and recommendations before the CLI agent does internal code analysis.
+   */
+  async scoutResearch(
+    goal: string,
+    scoutTask: string,
+    config: CoordinatorConfig,
+    maxMode?: boolean,
+  ): Promise<string> {
+    const depth = maxMode
+      ? 'Perform exhaustive research. Compare multiple approaches with detailed pros/cons. Leave no stone unturned.'
+      : 'Provide focused, actionable research. Compare the most relevant approaches.';
+
+    const prompt = [
+      'You are the Scout (external research mode) in a coordinated engineering swarm.',
+      `Overall goal: ${goal}`,
+      '',
+      `Your research task: ${scoutTask}`,
+      '',
+      '## Instructions',
+      depth,
+      '',
+      'Provide structured findings:',
+      '1. Best practices relevant to the goal',
+      '2. Recommended approaches with pros and cons',
+      '3. Key risks, trade-offs, and considerations',
+      '4. Specific, actionable recommendations',
+      '',
+      'Be concrete and specific. Reference real patterns, libraries, or techniques.',
+      'Format your output as clean markdown sections.',
+    ].join('\n');
+
+    return this.callCoordinator(prompt, config);
+  }
+
   async createLaunchPlan(goal: string, workspacePath: string, roles: AgentRoleType[], config?: CoordinatorConfig, maxMode?: boolean): Promise<CoordinatorPlan> {
     const requestedSlots = buildRequestedAssignmentSlots(roles);
     const roleCatalog = buildRoleCatalog(requestedSlots);
@@ -670,6 +706,8 @@ export class ClaudeCoordinator {
       '- If you need files outside your lane, stop and report the ownership gap instead of guessing.',
       '- Keep status updates short and operational. Mention touched files, validations, and blockers in your final summary.',
       '- Prioritize shipping code over conversation. Escalate quickly if blocked.',
+      '- Do NOT ask follow-up questions or request clarification. Work with the information you have. If anything is ambiguous, make a reasonable decision and note it in your summary.',
+      '- When your assigned work is fully complete, end this interactive session using your CLI\'s normal quit flow (e.g. /exit, exit, quit, or Ctrl+D — see your tool\'s docs) so the swarm can continue.',
     );
 
     if (maxMode) {
@@ -783,6 +821,8 @@ export class ClaudeCoordinator {
       '- Stay within your file ownership boundary.',
       '- Validate your fixes before reporting completion.',
       '- End with the ---BUILDER-REPORT--- structured block.',
+      '- Do NOT ask follow-up questions or request clarification. Work with the information you have.',
+      '- When the revision is complete, quit this CLI session the same way (e.g. /exit, exit, or your tool\'s documented command) so the swarm can continue.',
     ];
 
     if (maxMode) {
