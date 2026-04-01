@@ -115,7 +115,8 @@ const CLI_READY_COMMON: RegExp[] = [
 ];
 const CLI_READY_HINTS_CLAUDE: RegExp[] = [
   /╰─+╯/,
-  /[✻✦]\s*\w+\s+for\s+\d/,
+  // Claude 2.x uses several dingbat stars; timing lines may insert box-drawing between glyphs
+  /[✢✻✦✳✽][\s\u2500-\u257F]{0,40}[^\n]{0,160}?\bfor\s+/i,
 ];
 const CLI_READY_HINTS_GEMINI: RegExp[] = [/gemini\s+cli/i, /google\s+gemini/i];
 const CLI_READY_HINTS_CODEX: RegExp[] = [/openai\s*codex/i, /\bcodex\b.*[>›:?]/i];
@@ -264,6 +265,18 @@ export class AgentManager {
   private promptDeliveredAt: Map<string, number> = new Map();
   private completionTimers: Map<string, ReturnType<typeof setTimeout>> = new Map();
 
+  /**
+   * After `/exit`, Claude often returns to the login shell; the PTY stays open until the shell
+   * exits, so `pty-exit` never fires and the swarm waits forever. We escalate: shell `exit`, then kill.
+   */
+  private exitEscalationTimers = new Map<
+    string,
+    { shell?: ReturnType<typeof setTimeout>; kill?: ReturnType<typeof setTimeout> }
+  >();
+
+  /** Set before `pty_kill` from post-`/exit` escalation so exit code is treated as success. */
+  private completionForcedKill = new Set<string>();
+
   private initPromise: Promise<void> | null = null;
 
   constructor(eventEmitter: SwarmEventEmitter, workspacePath: string) {
@@ -404,16 +417,53 @@ export class AgentManager {
   }
 
   // -----------------------------------------------------------------------
-  // Completion detection — poll every 5s, scan full output for done markers
+  // Completion detection — poll every 5s; scan terminal output (not just line buffer)
   // -----------------------------------------------------------------------
 
   /**
-   * Patterns that indicate the CLI finished its task (not just "idle at prompt").
-   * These are scanned line-by-line across the ENTIRE output buffer, not just the tail.
+   * Claude Code completion timing lines (stars ✻✦✳ + "… for …"). Do not require digits after "for" —
+   * redraws often splice in "/btw", tips, or partial columns so `Brewed for  /btw` never matches `[\dms]+`.
+   * Swarm prompts also require explicit ---END-…--- blocks; those are higher-signal than timing lines.
    */
   private static readonly CLI_DONE_MARKERS: RegExp[] = [
-    /[✻✦]\s*\w+\s+for\s+\d/,
+    /[✢✻✦✳✽][\s\u2500-\u257F]{0,48}[^\n]{0,320}?\bfor\s+/i,
+    /\b(Baked|Brewed|Worked|Churned|Cogitated)\s+for\s+/i,
+    /---END-SCOUT-FINDINGS---/,
+    /---END-BUILDER-REPORT---/,
+    /---END-REVIEW-VERDICT---/,
+    // Printed when Claude Code has already quit; user is back at the login shell
+    /Resume this session with:/i,
   ];
+
+  /** Prompt/input idle — Claude Code primary prompt (not ASCII >). */
+  private static readonly CLI_IDLE_TAIL_PATTERNS: RegExp[] = [
+    /❯\s*$/m,
+    /❯\s*\n\s*$/m,
+    /^❯\s*$/m,
+    />\s*$/m,
+    /›\s*$/m,
+    // zsh default / themes often end with % when Claude has exited to the shell
+    /%\s*$/m,
+  ];
+
+  /**
+   * True if Claude-style "task finished" timing line appears anywhere in text.
+   * Scans full sanitized terminal tail so lines scrolled out of outputBuffer still match.
+   */
+  private static hasCliDoneMarker(text: string): boolean {
+    return AgentManager.CLI_DONE_MARKERS.some((re) => re.test(text));
+  }
+
+  /**
+   * True if the session looks parked at an input prompt (tail of recent output).
+   */
+  private static looksIdleAtPrompt(text: string, workerCLI: WorkerCLI): boolean {
+    const tail = text.slice(-20000);
+    // Claude has fully quit; remaining output is shell + resume hint — not "busy inside Claude"
+    if (/Resume this session with:/i.test(tail)) return true;
+    if (AgentManager.CLI_IDLE_TAIL_PATTERNS.some((re) => re.test(tail))) return true;
+    return getCliReadyPatterns(workerCLI).some((p) => p.test(tail));
+  }
 
   private startCompletionPolling(agentId: string): void {
     if (this.completionTimers.has(agentId)) return;
@@ -430,21 +480,40 @@ export class AgentManager {
       const deliveredAt = this.promptDeliveredAt.get(agentId) || 0;
       if (Date.now() - deliveredAt < 15_000) return;
 
-      // Scan every line in the buffer for a "done" marker
-      const hasDoneMarker = agent.outputBuffer.some((line) =>
-        AgentManager.CLI_DONE_MARKERS.some((re) => re.test(line)),
-      );
-      if (!hasDoneMarker) return;
+      // Full text: line buffer + sanitized terminal replay (done line may scroll off 500-line buffer)
+      const bufText = agent.outputBuffer.join('\n');
+      const termSan = sanitizeTerminalOutput(agent.terminalOutput.slice(-120_000));
+      const scanText = `${bufText}\n${termSan}`;
 
-      // Also verify the CLI is back at an idle prompt (not mid-output)
-      const tail = agent.outputBuffer.slice(-15).join('\n');
-      const idlePatterns = getCliReadyPatterns(this.workerCLI);
-      if (!idlePatterns.some((p) => p.test(tail))) return;
+      const hasDone = AgentManager.hasCliDoneMarker(scanText);
+      const idle = AgentManager.looksIdleAtPrompt(termSan, this.workerCLI);
+      const quietMs = Date.now() - agent.lastActivityAt.getTime();
 
-      console.log(`AgentManager: ${agentId} done marker + idle prompt detected — sending /exit`);
-      clearInterval(poll);
-      this.completionTimers.delete(agentId);
-      void invoke('pty_write', { sessionId: agent.sessionId, data: '/exit\r' }).catch(() => {});
+      // Primary: done marker + idle prompt in tail
+      if (hasDone && idle) {
+        console.log(`AgentManager: ${agentId} done + idle — quitting CLI and escalating shell exit`);
+        clearInterval(poll);
+        this.completionTimers.delete(agentId);
+        this.sendCliQuitAndEscalateShellExit(agentId);
+        return;
+      }
+
+      // Fallback: saw done marker, PTY quiet for 12s (CLI finished, prompt may not match regex)
+      if (hasDone && quietMs >= 12_000) {
+        console.log(`AgentManager: ${agentId} done marker + quiet ${quietMs}ms — quitting CLI and escalating`);
+        clearInterval(poll);
+        this.completionTimers.delete(agentId);
+        this.sendCliQuitAndEscalateShellExit(agentId);
+        return;
+      }
+
+      // Last resort: idle-looking tail + no PTY activity 20s (sitting at prompt after work)
+      if (idle && quietMs >= 20_000 && Date.now() - deliveredAt > 60_000) {
+        console.log(`AgentManager: ${agentId} idle + quiet 20s + working 60s — quitting CLI and escalating`);
+        clearInterval(poll);
+        this.completionTimers.delete(agentId);
+        this.sendCliQuitAndEscalateShellExit(agentId);
+      }
     }, 5000);
 
     this.completionTimers.set(agentId, poll as unknown as ReturnType<typeof setTimeout>);
@@ -457,6 +526,69 @@ export class AgentManager {
       clearTimeout(timer);
       this.completionTimers.delete(agentId);
     }
+  }
+
+  private clearExitEscalation(agentId: string): void {
+    const t = this.exitEscalationTimers.get(agentId);
+    if (!t) return;
+    if (t.shell) clearTimeout(t.shell);
+    if (t.kill) clearTimeout(t.kill);
+    this.exitEscalationTimers.delete(agentId);
+  }
+
+  /**
+   * Quit Claude (`/exit`), then close the shell and finally kill the PTY so the swarm can continue.
+   * If Claude has already exited (see "Resume this session with:"), `/exit` goes to zsh as a bogus path,
+   * spams errors, and keeps refreshing `lastActivityAt` — so we only send `exit` to the shell.
+   */
+  private sendCliQuitAndEscalateShellExit(agentId: string): void {
+    const agent = this.agents.get(agentId);
+    if (!agent || agent.status !== 'running') return;
+
+    this.clearExitEscalation(agentId);
+    const termSan = sanitizeTerminalOutput(agent.terminalOutput);
+    const alreadyAtShell = /Resume this session with:/i.test(termSan);
+
+    if (alreadyAtShell) {
+      console.log(`AgentManager: ${agentId} Claude already exited — closing shell (skipping /exit)`);
+      void invoke('pty_write', { sessionId: agent.sessionId, data: 'exit\r' }).catch(() => {});
+      const killTimer = setTimeout(() => {
+        this.exitEscalationTimers.delete(agentId);
+        const a = this.agents.get(agentId);
+        if (!a || a.status !== 'running') return;
+        console.warn(`AgentManager: ${agentId} PTY still open after shell exit — forcing kill`);
+        this.completionForcedKill.add(agentId);
+        void invoke('pty_kill', { sessionId: a.sessionId }).catch((err) => {
+          this.completionForcedKill.delete(agentId);
+          console.error(`AgentManager: pty_kill after completion failed for ${agentId}:`, err);
+        });
+      }, 14_000);
+      this.exitEscalationTimers.set(agentId, { kill: killTimer });
+      return;
+    }
+
+    void invoke('pty_write', { sessionId: agent.sessionId, data: '/exit\r' }).catch(() => {});
+
+    const shellTimer = setTimeout(() => {
+      const a = this.agents.get(agentId);
+      if (!a || a.status !== 'running') return;
+      console.log(`AgentManager: ${agentId} still open after /exit — sending shell exit`);
+      void invoke('pty_write', { sessionId: a.sessionId, data: 'exit\r' }).catch(() => {});
+    }, 8_000);
+
+    const killTimer = setTimeout(() => {
+      this.exitEscalationTimers.delete(agentId);
+      const a = this.agents.get(agentId);
+      if (!a || a.status !== 'running') return;
+      console.warn(`AgentManager: ${agentId} PTY still open — forcing kill so swarm can continue`);
+      this.completionForcedKill.add(agentId);
+      void invoke('pty_kill', { sessionId: a.sessionId }).catch((err) => {
+        this.completionForcedKill.delete(agentId);
+        console.error(`AgentManager: pty_kill after completion failed for ${agentId}:`, err);
+      });
+    }, 22_000);
+
+    this.exitEscalationTimers.set(agentId, { shell: shellTimer, kill: killTimer });
   }
 
   // -----------------------------------------------------------------------
@@ -504,16 +636,15 @@ export class AgentManager {
       }
     }
 
-    // Start polling for completion once the agent is working
-    if (currentPhase === 'working') {
-      this.startCompletionPolling(agentId);
-    }
-
-    // Add to sanitized line buffer
+    // Add to sanitized line buffer (before completion poll so scans see latest chunk)
     const lines = sanitized.split('\n').map((line) => line.trimEnd());
     agent.outputBuffer.push(...lines);
     if (agent.outputBuffer.length > MAX_OUTPUT_BUFFER) {
       agent.outputBuffer = agent.outputBuffer.slice(-MAX_OUTPUT_BUFFER);
+    }
+
+    if (currentPhase === 'working') {
+      this.startCompletionPolling(agentId);
     }
 
     this.eventEmitter.emitAgentEvent({ type: 'output', agentId, data: sanitized });
@@ -551,6 +682,7 @@ export class AgentManager {
     this.outputAccumulator.delete(agentId);
     this.cliLaunchedAt.delete(agentId);
     this.cancelCompletionTimer(agentId);
+    this.clearExitEscalation(agentId);
 
     if (agent.promptFilePath) {
       remove(agent.promptFilePath).catch(() => {});
@@ -558,7 +690,9 @@ export class AgentManager {
 
     const rawCode = exitCode ?? 0;
     const neverWorked = phase === 'spawning' || phase === 'launching_cli';
-    const code = neverWorked ? 0 : rawCode;
+    const forcedAfterCompletion = this.completionForcedKill.delete(agentId);
+    let code = neverWorked ? 0 : rawCode;
+    if (forcedAfterCompletion && phase === 'working') code = 0;
     agent.status = code === 0 ? 'completed' : 'failed';
 
     if (agent.status === 'failed') {
@@ -590,7 +724,7 @@ export class AgentManager {
           status: 'completed',
           startedAt: agent.startedAt,
           completedAt: new Date(),
-          output: agent.outputBuffer.join('\n'),
+          output: this.getAgentHandoffOutput(agentId),
           filesModified: agent.metrics.filesModified,
         },
       });
@@ -780,6 +914,7 @@ Restrictions: ${role.restrictions.join(', ')}
     this.agentPhase.delete(agentId);
     this.pendingPrompts.delete(agentId);
     this.cancelCompletionTimer(agentId);
+    this.clearExitEscalation(agentId);
 
     if (agent.promptFilePath) {
       remove(agent.promptFilePath).catch(() => {});
@@ -834,6 +969,19 @@ Restrictions: ${role.restrictions.join(', ')}
   getAgentOutput(agentId: string): string[] {
     const agent = this.agents.get(agentId);
     return agent ? [...agent.outputBuffer] : [];
+  }
+
+  /**
+   * Full session text for coordinator handoff. Prefers sanitized PTY replay (up to
+   * MAX_TERMINAL_OUTPUT_CHARS); the rolling line buffer only keeps the last 500 lines
+   * and drops earlier scout/builder output in long sessions.
+   */
+  getAgentHandoffOutput(agentId: string): string {
+    const agent = this.agents.get(agentId);
+    if (!agent) return '';
+    const fromTerm = sanitizeTerminalOutput(agent.terminalOutput).trim();
+    if (fromTerm.length > 0) return fromTerm;
+    return agent.outputBuffer.join('\n');
   }
 
   // -----------------------------------------------------------------------

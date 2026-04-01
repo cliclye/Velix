@@ -766,7 +766,9 @@ export const SwarmPanel: React.FC<SwarmPanelProps> = ({
             const agent = manager.getAgent(agentId);
             if (agent) {
               const assignment = plan.assignments.find((a) => a.id === agent.assignmentId);
-              if (assignment) outputs.set(assignment.label, agent.outputBuffer.join('\n'));
+              if (assignment) {
+                outputs.set(assignment.label, manager.getAgentHandoffOutput(agentId));
+              }
             }
           };
 
