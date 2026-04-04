@@ -490,8 +490,12 @@ export const SwarmPanel: React.FC<SwarmPanelProps> = ({
       disposed = true;
       setSwarmPtyReady(false);
       stopAutoSync();
-      void manager.terminateAll('Swarm panel closed').catch(() => {});
-      void manager.cleanup();
+      void manager
+        .terminateAll('Swarm panel closed')
+        .catch(() => {})
+        .finally(() => {
+          void manager.cleanup();
+        });
       unsubscribeOutput();
       unsubscribeExit();
       unsubscribeSpawn();
@@ -720,6 +724,15 @@ export const SwarmPanel: React.FC<SwarmPanelProps> = ({
       appendLog('plan', plan.summary);
       setStatusLabel('Launching Workers');
 
+      const bailIfAborted = (): boolean => {
+        if (!abort.signal.aborted) return false;
+        appendLog('dispatch', 'Swarm stopped by user.');
+        setStatusLabel('Stopped');
+        return true;
+      };
+
+      if (bailIfAborted()) return;
+
       // --- Shared swarm state ---
       const swarmState = {
         research: new Map<string, string>(),   // Scout findings keyed by label
@@ -740,15 +753,28 @@ export const SwarmPanel: React.FC<SwarmPanelProps> = ({
             return;
           }
 
+          if (abort.signal.aborted) {
+            reject(new DOMException('Swarm stopped by user', 'AbortError'));
+            return;
+          }
+
           const outputs = new Map<string, string>();
           const pending = new Set(agentIds);
           let resolved = false;
+          let stallChecker: ReturnType<typeof setInterval> | undefined;
+
+          const clearStallChecker = () => {
+            if (stallChecker !== undefined) {
+              clearInterval(stallChecker);
+              stallChecker = undefined;
+            }
+          };
 
           const finish = () => {
             if (resolved) return;
             resolved = true;
             unsubscribe();
-            clearInterval(stallChecker);
+            clearStallChecker();
             abort.signal.removeEventListener('abort', onAbort);
             resolve(outputs);
           };
@@ -757,7 +783,8 @@ export const SwarmPanel: React.FC<SwarmPanelProps> = ({
             if (resolved) return;
             resolved = true;
             unsubscribe();
-            clearInterval(stallChecker);
+            clearStallChecker();
+            abort.signal.removeEventListener('abort', onAbort);
             reject(new DOMException('Swarm stopped by user', 'AbortError'));
           };
           abort.signal.addEventListener('abort', onAbort);
@@ -778,9 +805,11 @@ export const SwarmPanel: React.FC<SwarmPanelProps> = ({
             if (pending.size === 0) finish();
           });
 
-          // Periodically check for stalled agents and terminate them
-          const stallChecker = setInterval(() => {
-            if (resolved) { clearInterval(stallChecker); return; }
+          stallChecker = setInterval(() => {
+            if (resolved) {
+              clearStallChecker();
+              return;
+            }
             const now = Date.now();
             for (const id of pending) {
               const agent = manager.getAgent(id);
@@ -822,6 +851,9 @@ export const SwarmPanel: React.FC<SwarmPanelProps> = ({
         await Promise.all(assignments.map(async (assignment, index) => {
           // Stagger PTY spawns slightly to avoid macOS/login-shell races when many agents start at once.
           await new Promise((r) => setTimeout(r, index * 150));
+          if (abort.signal.aborted) {
+            throw new DOMException('Swarm stopped by user', 'AbortError');
+          }
           const role = getRole(assignment.role);
 
           // Use task override (revision) or build normal worker task with dependency context
@@ -878,7 +910,7 @@ export const SwarmPanel: React.FC<SwarmPanelProps> = ({
             appendLog('error', `Scout ${assignment.label} API research failed: ${msg}`);
           }
         }));
-        if (abort.signal.aborted) return;
+        if (bailIfAborted()) return;
 
         // Phase 1b: Internal analysis via CLI — inject API research as context
         setStatusLabel('Scout Mapping (CLI)');
@@ -906,7 +938,7 @@ export const SwarmPanel: React.FC<SwarmPanelProps> = ({
           scoutTaskOverrides.size > 0 ? scoutTaskOverrides : undefined,
         );
         const scoutOutputs = await waitForAgents(scoutIds);
-        if (abort.signal.aborted) return;
+        if (bailIfAborted()) return;
 
         for (const [label, cliOutput] of scoutOutputs) {
           const apiOutput = scoutApiResearch.get(label) || '';
@@ -961,6 +993,7 @@ export const SwarmPanel: React.FC<SwarmPanelProps> = ({
         const builderIds = await spawnWave(builderAssignments, builderTaskOverrides, allResearch, false);
         setStatusLabel(isRevision ? `Builder Revision ${iteration}` : 'Builders Working');
         const builderOutputs = await waitForAgents(builderIds);
+        if (bailIfAborted()) return;
         for (const [label, output] of builderOutputs) swarmState.artifacts.set(label, output);
         appendLog('dispatch', `Builder wave complete: ${builderAssignments.map((a) => a.label).join(', ')}`);
         refreshAgents();
@@ -974,10 +1007,13 @@ export const SwarmPanel: React.FC<SwarmPanelProps> = ({
 
         setStatusLabel('Launching Reviewers');
 
+        if (bailIfAborted()) return;
+
         const reviewerContext = new Map<string, string>([...allResearch, ...swarmState.artifacts]);
         const reviewerIds = await spawnWave(reviewerAssignments, undefined, reviewerContext, true);
         setStatusLabel('Reviewers Evaluating');
         const reviewerOutputs = await waitForAgents(reviewerIds);
+        if (bailIfAborted()) return;
         for (const [label, output] of reviewerOutputs) swarmState.reviews.set(label, output);
         appendLog('dispatch', `Reviewer wave complete: ${reviewerAssignments.map((a) => a.label).join(', ')}`);
         refreshAgents();
@@ -985,9 +1021,13 @@ export const SwarmPanel: React.FC<SwarmPanelProps> = ({
         // --- Phase 4: Coordinator evaluates review verdict ---
         setStatusLabel('Coordinator Evaluating Review');
 
+        if (bailIfAborted()) return;
+
         const evaluation = await claudeCoordinator.evaluateReview(
           trimmedGoal, swarmState.reviews, swarmState.artifacts, coordinatorConfig,
         );
+
+        if (bailIfAborted()) return;
 
         appendLog('review', `Coordinator verdict: ${evaluation.verdict} — ${evaluation.summary}`);
         lastRevisionInstructions = evaluation.revisionInstructions;
@@ -1003,7 +1043,9 @@ export const SwarmPanel: React.FC<SwarmPanelProps> = ({
       }
 
       refreshAgents();
-      setStatusLabel(approved ? 'Complete' : 'Running');
+      if (!abort.signal.aborted) {
+        setStatusLabel(approved ? 'Complete' : 'Running');
+      }
     } catch (err) {
       if (err instanceof DOMException && err.name === 'AbortError') {
         // User stopped the swarm — agents already terminated by handleStopSwarm
@@ -1072,6 +1114,7 @@ export const SwarmPanel: React.FC<SwarmPanelProps> = ({
       await manager.terminateAll('Swarm stopped by user');
     }
     stopAutoSync();
+    setStatusLabel('Stopped');
     refreshAgents();
   }, [refreshAgents, stopAutoSync]);
 
@@ -1253,7 +1296,7 @@ export const SwarmPanel: React.FC<SwarmPanelProps> = ({
       setSelectedAgentId(null);
       setAgentChatMsg('');
     }
-  }, [boardAssignmentIdsKey, selectedAgentId]);
+  }, [boardAssignmentIdsKey, boardAssignmentsBase, selectedAgentId]);
 
   const coordinatorProviderName = useMemo(
     () => PROVIDERS.find((p) => p.id === coordinatorProvider)?.name || coordinatorProvider,

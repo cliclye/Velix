@@ -332,8 +332,15 @@ export class AgentManager {
     this.outputAccumulator.clear();
     this.cliLaunchedAt.clear();
     this.promptDeliveredAt.clear();
-    for (const t of this.completionTimers.values()) clearTimeout(t);
+    for (const t of this.completionTimers.values()) {
+      clearInterval(t as unknown as ReturnType<typeof setInterval>);
+      clearTimeout(t);
+    }
     this.completionTimers.clear();
+    for (const id of this.exitEscalationTimers.keys()) {
+      this.clearExitEscalation(id);
+    }
+    this.completionForcedKill.clear();
   }
 
   setPatternDetector(detector: (output: string) => PatternMatch | null): void {
@@ -681,6 +688,7 @@ export class AgentManager {
     this.pendingPrompts.delete(agentId);
     this.outputAccumulator.delete(agentId);
     this.cliLaunchedAt.delete(agentId);
+    this.promptDeliveredAt.delete(agentId);
     this.cancelCompletionTimer(agentId);
     this.clearExitEscalation(agentId);
 
@@ -913,8 +921,10 @@ Restrictions: ${role.restrictions.join(', ')}
     agent.failureReason = reason;
     this.agentPhase.delete(agentId);
     this.pendingPrompts.delete(agentId);
+    this.promptDeliveredAt.delete(agentId);
     this.cancelCompletionTimer(agentId);
     this.clearExitEscalation(agentId);
+    this.completionForcedKill.delete(agentId);
 
     if (agent.promptFilePath) {
       remove(agent.promptFilePath).catch(() => {});
