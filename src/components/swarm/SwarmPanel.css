@@ -86,6 +86,16 @@
   color: var(--text-primary);
 }
 
+.swarm-api-hint {
+  flex-shrink: 0;
+  padding: 8px 16px;
+  font-size: 11px;
+  line-height: 1.45;
+  color: var(--text-secondary);
+  background: color-mix(in srgb, var(--accent-primary) 12%, var(--bg-secondary));
+  border-bottom: 1px solid var(--border-default);
+}
+
 .swarm-planner {
   display: flex;
   flex-direction: column;
@@ -220,6 +230,21 @@
 
 .swarm-config-select:focus {
   border-color: var(--accent-primary);
+}
+
+.swarm-config-static {
+  flex: 1;
+  min-width: 0;
+  padding: 5px 8px;
+  border: 1px solid var(--border-default);
+  border-radius: 7px;
+  background: var(--bg-primary);
+  color: var(--text-primary);
+  font-family: var(--font-mono);
+  font-size: 11px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 .swarm-config-badge {

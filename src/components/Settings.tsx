@@ -2,156 +2,29 @@ import { useState, useEffect, useCallback } from "react";
 import { invoke } from "../platform/native";
 import { getWorkerCLIOptions, loadCustomCLIOptions, saveCustomCLIOptions } from "../services/swarm";
 import type { WorkerCLIOption } from "../services/swarm";
+import { PROVIDER_CATALOG, type ProviderID } from "../services/ai/modelCatalog";
 import velixLogo from "../../velixlogo.png";
 import "./Settings.css";
 
 export interface AIProvider {
-    id: "claude" | "chatgpt" | "gemini" | "glm4" | "minimax" | "kimi" | "deepseek" | "groq" | "mistral";
+    id: ProviderID;
     name: string;
     models: string[];
     placeholder: string;
-    isFree?: boolean;
     description?: string;
     apiKeySteps?: string[];
     apiKeyUrl?: string;
 }
 
-export const AI_PROVIDERS: AIProvider[] = [
-    {
-        id: "claude",
-        name: "Claude (Anthropic)",
-        models: ["claude-sonnet-4-6", "claude-opus-4-5", "claude-haiku-4-5"],
-        placeholder: "sk-ant-...",
-        apiKeyUrl: "https://console.anthropic.com",
-        apiKeySteps: [
-            "Go to console.anthropic.com",
-            "Sign up or log in to your Anthropic account",
-            "Click \"API Keys\" in the left sidebar",
-            "Click \"Create Key\" and give it a name",
-            "Copy the key — it starts with sk-ant-",
-        ]
-    },
-    {
-        id: "chatgpt",
-        name: "ChatGPT (OpenAI)",
-        models: ["gpt-4o", "gpt-4-turbo", "gpt-3.5-turbo", "o3", "o4-mini"],
-        placeholder: "sk-...",
-        apiKeyUrl: "https://platform.openai.com/api-keys",
-        apiKeySteps: [
-            "Go to platform.openai.com",
-            "Sign up or log in to your OpenAI account",
-            "Click your profile icon → \"API keys\"",
-            "Click \"Create new secret key\" and name it",
-            "Copy the key immediately — it starts with sk- and won't be shown again",
-        ]
-    },
-    {
-        id: "gemini",
-        name: "Gemini (Google)",
-        models: ["gemini-2.5-pro", "gemini-2.0-flash", "gemini-1.5-pro", "gemini-1.5-flash"],
-        placeholder: "AIza...",
-        apiKeyUrl: "https://aistudio.google.com/apikey",
-        apiKeySteps: [
-            "Go to aistudio.google.com",
-            "Sign in with your Google account",
-            "Click \"Get API key\" in the top-left area",
-            "Click \"Create API key in new project\" (or select an existing project)",
-            "Copy the generated key — it starts with AIza",
-        ]
-    },
-    {
-        id: "mistral",
-        name: "Mistral AI",
-        models: ["mistral-small-latest", "open-mistral-nemo", "codestral-latest"],
-        placeholder: "...",
-        isFree: true,
-        description: "Free tier available — Mistral Small & Nemo are free with no credit card required",
-        apiKeyUrl: "https://console.mistral.ai/api-keys",
-        apiKeySteps: [
-            "Go to console.mistral.ai",
-            "Sign up for free — no credit card required for the free tier",
-            "Click \"API keys\" in the left navigation panel",
-            "Click \"Create new key\" and give it a name",
-            "Copy the key before closing the dialog — it won't be shown again",
-        ]
-    },
-    {
-        id: "groq",
-        name: "Groq (Fast Inference)",
-        models: ["llama-3.3-70b-versatile", "llama-3.1-8b-instant", "mixtral-8x7b-32768", "gemma2-9b-it"],
-        placeholder: "gsk_...",
-        isFree: true,
-        description: "Free tier available — ultra-fast inference for open-source models, no credit card required",
-        apiKeyUrl: "https://console.groq.com/keys",
-        apiKeySteps: [
-            "Go to console.groq.com",
-            "Sign up for free — no credit card required",
-            "Click \"API Keys\" in the left sidebar",
-            "Click \"Create API Key\" and give it a name",
-            "Copy the key — it starts with gsk_",
-        ]
-    },
-    {
-        id: "deepseek",
-        name: "DeepSeek",
-        models: ["deepseek-chat", "deepseek-reasoner"],
-        placeholder: "sk-...",
-        description: "DeepSeek — cost-effective models with strong reasoning",
-        apiKeyUrl: "https://platform.deepseek.com/api_keys",
-        apiKeySteps: [
-            "Go to platform.deepseek.com",
-            "Sign up or log in to your DeepSeek account",
-            "Click \"API Keys\" in the left sidebar",
-            "Click \"Create API Key\" and give it a name",
-            "Copy the key — it starts with sk-",
-        ]
-    },
-    {
-        id: "kimi",
-        name: "Kimi (Moonshot AI)",
-        models: ["kimi-k2", "moonshot-v1-32k", "moonshot-v1-128k"],
-        placeholder: "sk-...",
-        description: "Kimi K2 — strong reasoning and coding model",
-        apiKeyUrl: "https://platform.moonshot.cn/console/api-keys",
-        apiKeySteps: [
-            "Go to platform.moonshot.cn",
-            "Sign up or log in to your Moonshot account",
-            "Click \"API Keys\" in the console sidebar",
-            "Click \"New API Key\" and give it a name",
-            "Copy the key — it starts with sk-",
-        ]
-    },
-    {
-        id: "glm4",
-        name: "GLM (Z.AI Coding Plan)",
-        models: ["glm-4.7", "glm-4.5", "glm-4-flash"],
-        placeholder: "zai-...",
-        description: "GLM-4.7 — flagship open-source coding model ($3/mo coding plan)",
-        apiKeyUrl: "https://bigmodel.cn",
-        apiKeySteps: [
-            "Go to bigmodel.cn (Z.AI platform)",
-            "Sign up or log in to your account",
-            "Navigate to the API Keys section in the console",
-            "Create a new API key",
-            "Copy the key — it starts with zai-",
-        ]
-    },
-    {
-        id: "minimax",
-        name: "MiniMax",
-        models: ["MiniMax-M2.5", "MiniMax-M2.1"],
-        placeholder: "eyJ...",
-        description: "MiniMax M2.5 — strong multi-language coding model",
-        apiKeyUrl: "https://platform.minimaxi.com",
-        apiKeySteps: [
-            "Go to platform.minimaxi.com",
-            "Sign up or log in to your MiniMax account",
-            "Click \"API Key\" in the left sidebar",
-            "Click \"Create\" to generate a new API key",
-            "Copy the key — it starts with eyJ",
-        ]
-    },
-];
+export const AI_PROVIDERS: AIProvider[] = PROVIDER_CATALOG.map((p) => ({
+    id: p.id,
+    name: p.name,
+    models: p.models.filter((m) => !m.disabled).map((m) => m.id),
+    placeholder: p.placeholder,
+    description: p.description,
+    apiKeySteps: p.apiKeySteps,
+    apiKeyUrl: p.apiKeyUrl,
+}));
 
 interface SettingsProps {
     isOpen: boolean;
@@ -310,9 +183,6 @@ export function Settings({ isOpen, onClose, onSave, currentConfig, theme, onThem
                                                 <span className="provider-name">{provider.name}</span>
                                             </label>
                                             <div className="provider-badges">
-                                                {provider.isFree && (
-                                                    <span className="free-badge">FREE</span>
-                                                )}
                                                 {selectedProvider === provider.id && (
                                                     <span className="active-badge">Active</span>
                                                 )}
@@ -482,7 +352,7 @@ export function Settings({ isOpen, onClose, onSave, currentConfig, theme, onThem
                                 <p className="about-eyebrow">BETA version</p>
                                 <h3>Velix</h3>
                                 <p>AI-Native Developer Terminal</p>
-                                <p className="version">Version 0.1.0 Beta</p>
+                                <p className="version">Version 0.2.0 Beta</p>
                             </div>
                         )}
                     </div>

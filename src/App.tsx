@@ -1,4 +1,4 @@
-import { useState, useCallback, useEffect, useRef, useMemo } from "react";
+import { useState, useCallback, useEffect, useRef, useMemo, type CSSProperties } from "react";
 import { open, invoke, writeTextFile, mkdir } from "./platform/native";
 import "./App.css";
 import { Settings, AIConfig, AI_PROVIDERS, AIProvider } from "./components/Settings";
@@ -8,6 +8,8 @@ import { SearchPanel } from "./components/SearchPanel";
 import { GitPanel } from "./components/GitPanel";
 import { VoiceChat } from "./components/VoiceChat";
 import { SwarmPanel } from "./components/swarm/SwarmPanel";
+import { AgentLoopPanel } from "./components/agent-loop";
+import { CommandPalette, type CommandPaletteItem } from "./components/CommandPalette";
 import { aiService } from "./services/ai";
 import { workspaceService, WorkspaceContext } from "./services/workspace";
 
@@ -19,11 +21,17 @@ interface TerminalPaneState {
   title: string;
 }
 
+type PairSplitAxis = "horizontal" | "vertical";
+
 interface WorkspaceTabState {
   id: string;
   title: string;
   panes: TerminalPaneState[];
   activePaneId: string;
+  /** Side-by-side (horizontal) or stacked (vertical); only used when `panes.length === 2`. */
+  pairSplitAxis: PairSplitAxis;
+  /** First pane’s flex-grow share when two panes (0.18–0.82). */
+  pairSplitRatio: number;
   shellCwd: string;
   projectDir: string;
   projectFileContents: Record<string, string>;
@@ -82,6 +90,11 @@ const parentDirOfFile = (absoluteFilePath: string) => {
 
 const getPaneGridColumnCount = (paneCount: number) => (paneCount <= 1 ? 1 : paneCount <= 4 ? 2 : 3);
 
+const clampPairSplitRatio = (n: number) => {
+  if (!Number.isFinite(n)) return 0.5;
+  return Math.min(0.82, Math.max(0.18, n));
+};
+
 const renumberPanes = (panes: TerminalPaneState[]) =>
   panes.map((pane, index) => ({
     ...pane,
@@ -92,6 +105,16 @@ const getPathLeaf = (value: string) => {
   const parts = value.split(/[\\/]/).filter(Boolean);
   return parts[parts.length - 1] || value;
 };
+
+/** Cmd+D / Cmd+W: handle only when focus is not in a normal form field (xterm uses a textarea inside `.xterm`). */
+function shouldHandleTerminalWorkspaceShortcut(target: EventTarget | null): boolean {
+  if (!(target instanceof HTMLElement)) return true;
+  if (target.closest(".xterm")) return true;
+  const tag = target.tagName;
+  if (tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT") return false;
+  if (target.isContentEditable) return false;
+  return true;
+}
 
 function App() {
   const [showSettings, setShowSettings] = useState(false);
@@ -111,6 +134,8 @@ function App() {
   const [showVoiceChat, setShowVoiceChat] = useState(false);
   const [showVoiceSetup, setShowVoiceSetup] = useState(false);
   const [swarmTabOpen, setSwarmTabOpen] = useState(false);
+  const [loopTabOpen, setLoopTabOpen] = useState(false);
+  const [commandPaletteOpen, setCommandPaletteOpen] = useState(false);
   const [openaiApiKey, setOpenaiApiKey] = useState("");
   const voiceSetupRef = useRef<HTMLDivElement>(null);
   const [_isAIProcessing, setIsAIProcessing] = useState(false);
@@ -145,6 +170,8 @@ function App() {
       title: "Tab 1",
       panes: [{ id: initialPaneIdRef.current, title: buildPaneTitle(1) }],
       activePaneId: initialPaneIdRef.current,
+      pairSplitAxis: "horizontal",
+      pairSplitRatio: 0.5,
       shellCwd: "~",
       projectDir: "",
       projectFileContents: {},
@@ -166,8 +193,20 @@ function App() {
   const [mainSplitResizing, setMainSplitResizing] = useState(false);
   const mainSplitResizeDragRef = useRef<{ startX: number; startPct: number } | null>(null);
 
+  const [pairSplitResizing, setPairSplitResizing] = useState(false);
+  const pairResizeDragRef = useRef<{
+    tabId: string;
+    axis: PairSplitAxis;
+    startClient: number;
+    startRatio: number;
+    trackPixels: number;
+    paneIds: [string, string];
+  } | null>(null);
+  const pendingPairRatioRef = useRef<number | null>(null);
+  const pairRatioRafRef = useRef<number | null>(null);
+
   const activeWorkspaceTabId = useMemo(() => {
-    const targetId = activeTerminalId === "swarm" ? lastWorkspaceTabId : activeTerminalId;
+    const targetId = activeTerminalId === "swarm" || activeTerminalId === "loop" ? lastWorkspaceTabId : activeTerminalId;
     return workspaceTabs.some((tab) => tab.id === targetId)
       ? targetId
       : (workspaceTabs[0]?.id || "");
@@ -176,6 +215,15 @@ function App() {
     () => workspaceTabs.find((tab) => tab.id === activeWorkspaceTabId) || workspaceTabs[0] || null,
     [workspaceTabs, activeWorkspaceTabId],
   );
+
+  const activeTabPaneLayoutKey = useMemo(() => {
+    if (activeTerminalId === "swarm" || activeTerminalId === "loop") return "";
+    const tab = workspaceTabs.find((t) => t.id === activeTerminalId);
+    if (!tab) return "";
+    const pairMeta = tab.panes.length === 2 ? `:${tab.pairSplitAxis}` : "";
+    return `${tab.panes.map((p) => p.id).join(",")}:${tab.activePaneId}${pairMeta}`;
+  }, [activeTerminalId, workspaceTabs]);
+
   const currentDir = useMemo(() => activeWorkspaceTab?.projectDir || "", [activeWorkspaceTab]);
   const workspaceContext = useMemo(() => activeWorkspaceTab?.workspaceContext || null, [activeWorkspaceTab]);
   const currentBranch = useMemo(() => activeWorkspaceTab?.currentBranch || "", [activeWorkspaceTab]);
@@ -200,7 +248,7 @@ function App() {
   useEffect(() => () => clearSetupTransitionTimers(), [clearSetupTransitionTimers]);
 
   useEffect(() => {
-    if (activeTerminalId !== "swarm") {
+    if (activeTerminalId !== "swarm" && activeTerminalId !== "loop") {
       setLastWorkspaceTabId(activeTerminalId);
     }
     // When switching tabs, immediately fit all terminal panes in the newly
@@ -215,6 +263,27 @@ function App() {
     });
     // eslint-disable-next-line react-hooks/exhaustive-deps -- only re-run on tab switch, not on every workspaceTabs mutation
   }, [activeTerminalId]);
+
+  useEffect(() => {
+    if (!activeTabPaneLayoutKey || activeTerminalId === "swarm" || activeTerminalId === "loop") return;
+    const tab = workspaceTabs.find((t) => t.id === activeTerminalId);
+    if (!tab) return;
+
+    let cancelled = false;
+    requestAnimationFrame(() => {
+      requestAnimationFrame(() => {
+        if (cancelled) return;
+        for (const pane of tab.panes) {
+          terminalRefs.current.get(pane.id)?.fit();
+        }
+        terminalRefs.current.get(tab.activePaneId)?.focus();
+      });
+    });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [activeTabPaneLayoutKey, activeTerminalId, workspaceTabs]);
 
   const addWorkspaceTab = useCallback(() => {
     const newTabId = makeId("tab");
@@ -236,6 +305,8 @@ function App() {
           title: `Tab ${nextNumber}`,
           panes: [{ id: newPaneId, title: buildPaneTitle(1) }],
           activePaneId: newPaneId,
+          pairSplitAxis: "horizontal",
+          pairSplitRatio: 0.5,
           shellCwd: defaultShellCwd,
           projectDir: "",
           projectFileContents: {},
@@ -250,7 +321,7 @@ function App() {
     setLastWorkspaceTabId(newTabId);
   }, [defaultShellCwd]);
 
-  const addSplitPane = useCallback((targetTabId?: string) => {
+  const addSplitPane = useCallback((targetTabId?: string, opts?: { stack?: boolean }) => {
     const tabId = targetTabId || activeWorkspaceTabId;
     if (!tabId) return;
 
@@ -265,10 +336,15 @@ function App() {
         { id: newPaneId, title: buildPaneTitle(tab.panes.length + 1) },
       ];
 
+      const wasSingle = tab.panes.length === 1;
+      const stack = opts?.stack === true;
+
       return {
         ...tab,
         panes: renumberPanes(nextPanes),
         activePaneId: newPaneId,
+        pairSplitAxis: wasSingle ? (stack ? "vertical" : "horizontal") : tab.pairSplitAxis,
+        pairSplitRatio: wasSingle ? 0.5 : tab.pairSplitRatio,
       };
     });
 
@@ -276,10 +352,43 @@ function App() {
     setLastWorkspaceTabId(tabId);
   }, [activeWorkspaceTabId, updateWorkspaceTab]);
 
+  const togglePairSplitAxis = useCallback((tabId: string) => {
+    updateWorkspaceTab(tabId, (tab) => {
+      if (tab.panes.length !== 2) return tab;
+      return {
+        ...tab,
+        pairSplitAxis: tab.pairSplitAxis === "horizontal" ? "vertical" : "horizontal",
+        pairSplitRatio: 0.5,
+      };
+    });
+  }, [updateWorkspaceTab]);
+
+  const handlePairSplitChord = useCallback(() => {
+    const tabId = activeWorkspaceTabId;
+    if (!tabId) return;
+    const tab = workspaceTabs.find((t) => t.id === tabId);
+    if (!tab) return;
+    if (tab.panes.length === 1) {
+      addSplitPane(tabId, { stack: true });
+    } else if (tab.panes.length === 2) {
+      togglePairSplitAxis(tabId);
+    }
+  }, [activeWorkspaceTabId, workspaceTabs, addSplitPane, togglePairSplitAxis]);
+
   const closeSwarmTab = useCallback(() => {
     setSwarmTabOpen(false);
     setActiveTerminalId((prev) => {
       if (prev !== "swarm") return prev;
+      return workspaceTabs.some((tab) => tab.id === lastWorkspaceTabId)
+        ? lastWorkspaceTabId
+        : (workspaceTabs[0]?.id || "");
+    });
+  }, [lastWorkspaceTabId, workspaceTabs]);
+
+  const closeLoopTab = useCallback(() => {
+    setLoopTabOpen(false);
+    setActiveTerminalId((prev) => {
+      if (prev !== "loop") return prev;
       return workspaceTabs.some((tab) => tab.id === lastWorkspaceTabId)
         ? lastWorkspaceTabId
         : (workspaceTabs[0]?.id || "");
@@ -298,6 +407,11 @@ function App() {
         nextPanes[Math.max(0, paneIndex - 1)] ||
         nextPanes[0];
 
+      const pairDefaults =
+        nextPanes.length === 2
+          ? { pairSplitAxis: "horizontal" as PairSplitAxis, pairSplitRatio: 0.5 }
+          : {};
+
       return {
         ...tab,
         panes: renumberPanes(nextPanes),
@@ -305,6 +419,7 @@ function App() {
           tab.activePaneId === paneId || !nextPanes.some((pane) => pane.id === tab.activePaneId)
             ? fallbackPane.id
             : tab.activePaneId,
+        ...pairDefaults,
       };
     });
   }, [updateWorkspaceTab]);
@@ -386,7 +501,10 @@ function App() {
     const rect = event.currentTarget.getBoundingClientRect();
     const relativeX = rect.width > 0 ? (event.clientX - rect.left) / rect.width : 0.5;
     const relativeY = rect.height > 0 ? (event.clientY - rect.top) / rect.height : 0.5;
-    const columns = getPaneGridColumnCount(tab.panes.length);
+    const columns =
+      tab.panes.length === 2 && tab.pairSplitAxis === "vertical"
+        ? 1
+        : getPaneGridColumnCount(tab.panes.length);
 
     if (relativeY <= 0.28) {
       return Math.max(0, targetIndex - columns);
@@ -479,6 +597,82 @@ function App() {
     };
   }, [mainSplitResizing]);
 
+  const flushPendingPairRatio = useCallback(() => {
+    pairRatioRafRef.current = null;
+    const drag = pairResizeDragRef.current;
+    const next = pendingPairRatioRef.current;
+    pendingPairRatioRef.current = null;
+    if (!drag || next === null) return;
+    updateWorkspaceTab(drag.tabId, (t) =>
+      t.id !== drag.tabId ? t : { ...t, pairSplitRatio: clampPairSplitRatio(next) },
+    );
+    for (const id of drag.paneIds) {
+      terminalRefs.current.get(id)?.fit();
+    }
+  }, [updateWorkspaceTab]);
+
+  useEffect(() => {
+    if (!pairSplitResizing) return;
+
+    const onMove = (e: MouseEvent) => {
+      const drag = pairResizeDragRef.current;
+      if (!drag) return;
+      const delta =
+        drag.axis === "horizontal" ? e.clientX - drag.startClient : e.clientY - drag.startClient;
+      pendingPairRatioRef.current = clampPairSplitRatio(drag.startRatio + delta / drag.trackPixels);
+      if (pairRatioRafRef.current === null) {
+        pairRatioRafRef.current = requestAnimationFrame(flushPendingPairRatio);
+      }
+    };
+
+    const onUp = (e: MouseEvent) => {
+      if (pairRatioRafRef.current !== null) {
+        cancelAnimationFrame(pairRatioRafRef.current);
+        pairRatioRafRef.current = null;
+      }
+      const drag = pairResizeDragRef.current;
+      if (drag) {
+        const delta =
+          drag.axis === "horizontal" ? e.clientX - drag.startClient : e.clientY - drag.startClient;
+        pendingPairRatioRef.current = clampPairSplitRatio(drag.startRatio + delta / drag.trackPixels);
+      }
+      flushPendingPairRatio();
+      pairResizeDragRef.current = null;
+      setPairSplitResizing(false);
+    };
+
+    window.addEventListener("mousemove", onMove);
+    window.addEventListener("mouseup", onUp);
+    return () => {
+      window.removeEventListener("mousemove", onMove);
+      window.removeEventListener("mouseup", onUp);
+    };
+  }, [pairSplitResizing, flushPendingPairRatio]);
+
+  const handlePairSplitterMouseDown = useCallback((e: React.MouseEvent<HTMLDivElement>, tab: WorkspaceTabState) => {
+    e.preventDefault();
+    e.stopPropagation();
+    if (tab.panes.length !== 2) return;
+    const panel = (e.currentTarget as HTMLElement).closest(".terminal-tab-panel");
+    if (!panel) return;
+    const rect = panel.getBoundingClientRect();
+    const axis = tab.pairSplitAxis;
+    const trackRaw = axis === "horizontal" ? rect.width : rect.height;
+    const trackPixels = Math.max(80, trackRaw - 24);
+    const p0 = tab.panes[0]?.id;
+    const p1 = tab.panes[1]?.id;
+    if (!p0 || !p1) return;
+    pairResizeDragRef.current = {
+      tabId: tab.id,
+      axis,
+      startClient: axis === "horizontal" ? e.clientX : e.clientY,
+      startRatio: clampPairSplitRatio(tab.pairSplitRatio),
+      trackPixels,
+      paneIds: [p0, p1],
+    };
+    setPairSplitResizing(true);
+  }, []);
+
   const closeWorkspaceTab = useCallback((tabId: string, e?: React.MouseEvent) => {
     e?.stopPropagation();
 
@@ -510,6 +704,10 @@ function App() {
       closeSwarmTab();
       return;
     }
+    if (activeTerminalId === "loop") {
+      closeLoopTab();
+      return;
+    }
 
     if (!activeWorkspaceTab) return;
 
@@ -519,7 +717,7 @@ function App() {
     }
 
     closeWorkspaceTab(activeWorkspaceTab.id);
-  }, [activeTerminalId, activeWorkspaceTab, closeSplitPane, closeSwarmTab, closeWorkspaceTab]);
+  }, [activeTerminalId, activeWorkspaceTab, closeSplitPane, closeSwarmTab, closeLoopTab, closeWorkspaceTab]);
 
   useEffect(() => {
     invoke<string>("get_shell_cwd")
@@ -545,7 +743,7 @@ function App() {
         // No OpenAI key saved.
       }
 
-      const providerOrder = ["claude", "chatgpt", "gemini", "glm4", "minimax", "kimi", "deepseek", "groq", "mistral"];
+      const providerOrder = ["claude", "chatgpt", "gemini"];
       const orderedProviders = providerOrder
         .map((id) => AI_PROVIDERS.find((provider) => provider.id === id))
         .filter((provider): provider is AIProvider => provider !== undefined);
@@ -574,20 +772,53 @@ function App() {
 
   useEffect(() => {
     const handleGlobalKeyDown = (e: KeyboardEvent) => {
+      const target = e.target as HTMLElement;
+      const tag = target.tagName;
+
+      if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "k") {
+        const inPalette = target.closest(".command-palette-panel");
+        if (!commandPaletteOpen) {
+          if (target.isContentEditable) return;
+          if ((tag === "INPUT" || tag === "TEXTAREA") && !inPalette) return;
+        }
+        e.preventDefault();
+        setCommandPaletteOpen((open) => !open);
+        return;
+      }
+
+      if ((e.metaKey || e.ctrlKey) && e.shiftKey && e.key.toLowerCase() === "a") {
+        if (!currentDir) return;
+        e.preventDefault();
+        setSwarmTabOpen(true);
+        setActiveTerminalId("swarm");
+        return;
+      }
+
+      if ((e.metaKey || e.ctrlKey) && e.shiftKey && e.key.toLowerCase() === "d") {
+        if (!shouldHandleTerminalWorkspaceShortcut(e.target)) return;
+        e.preventDefault();
+        handlePairSplitChord();
+        return;
+      }
+
       if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "d") {
+        if (!shouldHandleTerminalWorkspaceShortcut(e.target)) return;
         e.preventDefault();
         addSplitPane();
+        return;
       }
 
       if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "w") {
+        if (!shouldHandleTerminalWorkspaceShortcut(e.target)) return;
         e.preventDefault();
         closeActivePaneOrTab();
+        return;
       }
     };
 
-    window.addEventListener("keydown", handleGlobalKeyDown);
-    return () => window.removeEventListener("keydown", handleGlobalKeyDown);
-  }, [addSplitPane, closeActivePaneOrTab]);
+    window.addEventListener("keydown", handleGlobalKeyDown, true);
+    return () => window.removeEventListener("keydown", handleGlobalKeyDown, true);
+  }, [addSplitPane, closeActivePaneOrTab, commandPaletteOpen, currentDir, handlePairSplitChord]);
 
   const getActivePaneRefs = useCallback(() => (
     activeWorkspaceTab?.panes
@@ -944,6 +1175,7 @@ Working directory: ${currentDir || "unknown"}`;
           currentBranch: "",
         }));
 
+        setSwarmTabOpen(true);
         await refreshGitStatus(activeWorkspaceTab.id, selected);
       }
     } catch (error) {
@@ -1011,7 +1243,7 @@ Working directory: ${currentDir || "unknown"}`;
     await refreshGitStatus(activeWorkspaceTab.id, currentDir);
   }, [activeWorkspaceTab, currentDir, loadProjectFiles, refreshGitStatus, updateWorkspaceTab]);
 
-  const togglePanel = (panel: "search" | "git" | "voice" | "swarm" | null) => {
+  const togglePanel = (panel: "search" | "git" | "voice" | "swarm" | "loop" | null) => {
     setShowVoiceSetup(false);
 
     if (panel === null) {
@@ -1033,6 +1265,18 @@ Working directory: ${currentDir || "unknown"}`;
       return;
     }
 
+    if (panel === "loop") {
+      if (!loopTabOpen) {
+        setLoopTabOpen(true);
+        setActiveTerminalId('loop');
+      } else if (activeTerminalId !== 'loop') {
+        setActiveTerminalId('loop');
+      } else {
+        closeLoopTab();
+      }
+      return;
+    }
+
     setShowSearchPanel(panel === "search" ? !showSearchPanel : false);
     setShowGitPanel(panel === "git" ? !showGitPanel : false);
     setShowVoiceChat(panel === "voice" ? !showVoiceChat : false);
@@ -1045,8 +1289,137 @@ Working directory: ${currentDir || "unknown"}`;
     ? (activeWorkspaceTab.projectDir ? getPathLeaf(activeWorkspaceTab.projectDir) : activeWorkspaceTab.title)
     : "Terminal";
   const activeTerminalTitle = activeTerminalId === 'swarm'
-    ? 'Swarm'
-    : activeWorkspaceTitle;
+    ? 'Agents'
+    : activeTerminalId === 'loop'
+      ? 'Agent Loop'
+      : activeWorkspaceTitle;
+
+  const modShortcutLabel =
+    typeof navigator !== "undefined" && /Mac|iPhone|iPod|iPad/i.test(navigator.userAgent)
+      ? "⌘"
+      : "Ctrl+";
+
+  const commandPaletteItems = useMemo((): CommandPaletteItem[] => {
+    return [
+      {
+        id: "agent-loop",
+        title: "Open Agent Loop",
+        subtitle: "Autonomous goal-driven coding with role-based models",
+        keywords: ["loop", "autonomous", "agent"],
+        disabled: !currentDir,
+        onSelect: () => {
+          setLoopTabOpen(true);
+          setActiveTerminalId("loop");
+        },
+      },
+      {
+        id: "agents",
+        title: "Open Agents",
+        subtitle: "Coordinator, scouts, builders, and reviewer CLIs",
+        keywords: ["swarm", "multi-agent", "claude"],
+        shortcut: `${modShortcutLabel}⇧A`,
+        disabled: !currentDir,
+        onSelect: () => {
+          setSwarmTabOpen(true);
+          setActiveTerminalId("swarm");
+        },
+      },
+      {
+        id: "terminal",
+        title: "Focus terminal",
+        subtitle: "Shell tabs and splits",
+        keywords: ["shell"],
+        onSelect: () => {
+          const id = workspaceTabs.some((t) => t.id === lastWorkspaceTabId)
+            ? lastWorkspaceTabId
+            : workspaceTabs[0]?.id || "";
+          if (id) setActiveTerminalId(id);
+        },
+      },
+      {
+        id: "open-project",
+        title: "Open project folder",
+        subtitle: "Workspace root for context, git, and agents",
+        keywords: ["folder", "directory"],
+        onSelect: () => void handleOpenProject(),
+      },
+      {
+        id: "new-tab",
+        title: "New terminal tab",
+        onSelect: () => addWorkspaceTab(),
+      },
+      {
+        id: "split",
+        title: "Split terminal pane",
+        subtitle: "Side-by-side panes in the active tab",
+        keywords: ["divide", "pane", "multi", "warp"],
+        shortcut: `${modShortcutLabel}D`,
+        onSelect: () => addSplitPane(),
+      },
+      {
+        id: "split-shift",
+        title:
+          activeWorkspaceTab?.panes.length === 2
+            ? "Toggle split orientation"
+            : "Split terminal pane (stacked)",
+        subtitle:
+          activeWorkspaceTab?.panes.length === 2
+            ? "Side-by-side ↔ stacked"
+            : "New pane below (when one pane)",
+        keywords: ["vertical", "stack", "layout", "horizontal"],
+        shortcut: `${modShortcutLabel}⇧D`,
+        disabled: !activeWorkspaceTab || activeWorkspaceTab.panes.length > 2,
+        onSelect: () => handlePairSplitChord(),
+      },
+      {
+        id: "close-pane",
+        title: "Close active pane or tab",
+        shortcut: `${modShortcutLabel}W`,
+        onSelect: () => closeActivePaneOrTab(),
+      },
+      {
+        id: "search",
+        title: "Toggle search panel",
+        onSelect: () => togglePanel("search"),
+      },
+      {
+        id: "git",
+        title: "Toggle git panel",
+        onSelect: () => togglePanel("git"),
+      },
+      {
+        id: "collapse-side",
+        title: "Hide side panels",
+        subtitle: "Full-width terminal",
+        onSelect: () => togglePanel(null),
+      },
+      {
+        id: "settings",
+        title: "Open settings",
+        onSelect: () => setShowSettings(true),
+      },
+      {
+        id: "theme",
+        title: theme === "dark" ? "Use light theme" : "Use dark theme",
+        onSelect: () => handleThemeChange(theme === "dark" ? "light" : "dark"),
+      },
+    ];
+  }, [
+    modShortcutLabel,
+    currentDir,
+    workspaceTabs,
+    lastWorkspaceTabId,
+    theme,
+    addWorkspaceTab,
+    addSplitPane,
+    closeActivePaneOrTab,
+    handleOpenProject,
+    handleThemeChange,
+    togglePanel,
+    activeWorkspaceTab,
+    handlePairSplitChord,
+  ]);
+
   const getPaneGridStyle = useCallback((paneCount: number) => {
     if (paneCount <= 1) return undefined;
     const columns = getPaneGridColumnCount(paneCount);
@@ -1058,7 +1431,7 @@ Working directory: ${currentDir || "unknown"}`;
   }, []);
 
   return (
-    <div className={`app ${theme}`}>
+    <div className={`app ${theme}${pairSplitResizing ? " pair-split-resizing" : ""}`}>
       {/* ── Left activity sidebar ── */}
       <div className="activity-bar">
         <div className="activity-top">
@@ -1175,10 +1548,22 @@ Working directory: ${currentDir || "unknown"}`;
           </button>
 
           <button
+            className={`activity-btn ${activeTerminalId === 'loop' ? "active" : ""}`}
+            onClick={() => togglePanel("loop")}
+            disabled={!currentDir}
+            title={!currentDir ? "Agent Loop requires an open project." : "Agent Loop — autonomous execution"}
+          >
+            <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.75" strokeLinecap="round" strokeLinejoin="round">
+              <path d="M21 12a9 9 0 1 1-3-6.7" />
+              <polyline points="21 3 21 9 15 9" />
+            </svg>
+          </button>
+
+          <button
             className={`activity-btn ${activeTerminalId === 'swarm' ? "active" : ""}`}
             onClick={() => togglePanel("swarm")}
             disabled={!currentDir}
-            title={!currentDir ? "Swarm requires an open project." : "Swarm Mode — coordinator, scout, builders, and reviewer"}
+            title={!currentDir ? "Agents require an open project." : "Agents — coordinated swarm (⌘⇧A / Ctrl+Shift+A)"}
           >
             <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.75" strokeLinecap="round" strokeLinejoin="round">
               <circle cx="12" cy="5" r="2.5" />
@@ -1218,7 +1603,10 @@ Working directory: ${currentDir || "unknown"}`;
                 </button>
 
                 <div className="workspace-bar">
-                  <span className="workspace-label">Workspace</span>
+                  <div className="workspace-heading">
+                    <span className="workspace-label">Workspace</span>
+                    <span className="workspace-tagline">Terminal · agents · project context</span>
+                  </div>
                   <div className="workspace-summary">
                     <span className="workspace-name">{projectName}</span>
                     <span className="workspace-path">
@@ -1276,8 +1664,21 @@ Working directory: ${currentDir || "unknown"}`;
                         <line x1="12" y1="12" x2="5" y2="16.5" />
                         <line x1="12" y1="12" x2="19" y2="16.5" />
                       </svg>
-                      <span className="terminal-tab-title">Swarm</span>
+                      <span className="terminal-tab-title">Agents</span>
                       <button className="terminal-tab-close" onClick={(e) => { e.stopPropagation(); closeSwarmTab(); }}>×</button>
+                    </div>
+                  )}
+                  {loopTabOpen && (
+                    <div
+                      className={`terminal-tab terminal-tab-loop${activeTerminalId === 'loop' ? ' active' : ''}`}
+                      onClick={() => setActiveTerminalId('loop')}
+                    >
+                      <svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="terminal-tab-icon">
+                        <path d="M21 12a9 9 0 1 1-3-6.7" />
+                        <polyline points="21 3 21 9 15 9" />
+                      </svg>
+                      <span className="terminal-tab-title">Loop</span>
+                      <button className="terminal-tab-close" onClick={(e) => { e.stopPropagation(); closeLoopTab(); }}>×</button>
                     </div>
                   )}
                   <button className="terminal-tab-add" onClick={addWorkspaceTab} title="New Tab">
@@ -1294,11 +1695,25 @@ Working directory: ${currentDir || "unknown"}`;
               {swarmTabOpen && (
                 <div
                   className={`terminal-tab-panel terminal-tab-panel-swarm${activeTerminalId === "swarm" ? " active" : ""}`}
-                  style={activeTerminalId === "swarm" ? undefined : { visibility: "hidden", position: "absolute", pointerEvents: "none" }}
+                  style={activeTerminalId === "swarm" ? undefined : { visibility: "hidden", position: "absolute", inset: 0, pointerEvents: "none" }}
                 >
                   <SwarmPanel
                     isOpen={true}
                     onClose={closeSwarmTab}
+                    theme={theme}
+                    workspacePath={currentDir}
+                    hasApiKey={!!aiConfig?.apiKey}
+                  />
+                </div>
+              )}
+
+              {loopTabOpen && (
+                <div
+                  className={`terminal-tab-panel terminal-tab-panel-loop${activeTerminalId === "loop" ? " active" : ""}`}
+                  style={activeTerminalId === "loop" ? undefined : { visibility: "hidden", position: "absolute", inset: 0, pointerEvents: "none" }}
+                >
+                  <AgentLoopPanel
+                    isOpen={true}
                     theme={theme}
                     workspacePath={currentDir}
                     hasApiKey={!!aiConfig?.apiKey}
@@ -1314,30 +1729,88 @@ Working directory: ${currentDir || "unknown"}`;
                       : null;
                   const renderedPaneCount = tab.panes.length + (previewIndex !== null ? 1 : 0);
                   const isActiveTab = tab.id === activeTerminalId;
-                  const panelStyle = isActiveTab
-                    ? getPaneGridStyle(renderedPaneCount)
-                    : { ...getPaneGridStyle(renderedPaneCount), visibility: "hidden" as const, position: "absolute" as const, pointerEvents: "none" as const };
-                  const renderItems: Array<
+                  const pairFlexMode = tab.panes.length === 2 && previewIndex === null;
+                  const ratio = clampPairSplitRatio(tab.pairSplitRatio);
+
+                  const hiddenOverlay: CSSProperties = {
+                    visibility: "hidden",
+                    position: "absolute",
+                    pointerEvents: "none",
+                    inset: 0,
+                    width: "100%",
+                    height: "100%",
+                  };
+
+                  let panelStyle: CSSProperties | undefined;
+                  if (renderedPaneCount <= 1) {
+                    panelStyle = isActiveTab ? undefined : hiddenOverlay;
+                  } else if (pairFlexMode) {
+                    const flexBase: CSSProperties = {
+                      display: "flex",
+                      flexDirection: tab.pairSplitAxis === "vertical" ? "column" : "row",
+                      gap: 0,
+                      flex: "1 1 auto",
+                      width: "100%",
+                      height: "100%",
+                      minWidth: 0,
+                      minHeight: 0,
+                      overflow: "hidden",
+                    };
+                    panelStyle = isActiveTab ? flexBase : { ...flexBase, ...hiddenOverlay };
+                  } else {
+                    const grid = getPaneGridStyle(renderedPaneCount);
+                    panelStyle = isActiveTab
+                      ? grid
+                      : { ...grid, ...hiddenOverlay };
+                  }
+
+                  type BlockItem =
                     | { type: "pane"; pane: TerminalPaneState }
                     | { type: "preview"; key: string }
-                  > = tab.panes.map((pane) => ({ type: "pane", pane }));
+                    | { type: "splitter"; key: string };
 
+                  const blockItems: BlockItem[] = [];
                   if (previewIndex !== null) {
-                    renderItems.splice(previewIndex, 0, {
+                    tab.panes.forEach((pane) => {
+                      blockItems.push({ type: "pane", pane });
+                    });
+                    blockItems.splice(previewIndex, 0, {
                       type: "preview",
                       key: `${tab.id}-preview-${previewIndex}`,
                     });
+                  } else if (pairFlexMode) {
+                    tab.panes.forEach((pane, idx) => {
+                      blockItems.push({ type: "pane", pane });
+                      if (idx < tab.panes.length - 1) {
+                        blockItems.push({ type: "splitter", key: `${tab.id}-split-${idx}` });
+                      }
+                    });
+                  } else {
+                    tab.panes.forEach((pane) => {
+                      blockItems.push({ type: "pane", pane });
+                    });
                   }
+
+                  const panelClass = [
+                    "terminal-tab-panel",
+                    tab.panes.length > 1 ? "split-view" : "",
+                    pairFlexMode ? "split-pair" : "",
+                    pairFlexMode && tab.pairSplitAxis === "vertical" ? "split-pair-vertical" : "",
+                    isActiveTab ? "active" : "",
+                    pairSplitResizing && isActiveTab && pairFlexMode ? "pair-resizing" : "",
+                  ]
+                    .filter(Boolean)
+                    .join(" ");
 
                   return (
                     <div
                       key={tab.id}
-                      className={`terminal-tab-panel${tab.panes.length > 1 ? " split-view" : ""}${tab.id === activeTerminalId ? " active" : ""}`}
+                      className={panelClass}
                       style={panelStyle}
                       onDragOver={(e) => handlePanePanelDragOver(e, tab)}
                       onDrop={(e) => handlePaneDrop(e, tab)}
                     >
-                      {renderItems.map((item) => {
+                      {blockItems.map((item) => {
                         if (item.type === "preview") {
                           return (
                             <div
@@ -1357,13 +1830,45 @@ Working directory: ${currentDir || "unknown"}`;
                           );
                         }
 
+                        if (item.type === "splitter") {
+                          return (
+                            <div
+                              key={item.key}
+                              className="terminal-pair-splitter"
+                              role="separator"
+                              aria-orientation={tab.pairSplitAxis === "horizontal" ? "vertical" : "horizontal"}
+                              aria-label="Resize panes"
+                              onMouseDown={(e) => handlePairSplitterMouseDown(e, tab)}
+                            />
+                          );
+                        }
+
                         const pane = item.pane;
                         const isActivePane = pane.id === tab.activePaneId;
+                        const paneIndex = tab.panes.findIndex((p) => p.id === pane.id);
+                        const flexShare =
+                          pairFlexMode && paneIndex === 0
+                            ? ratio
+                            : pairFlexMode && paneIndex === 1
+                              ? 1 - ratio
+                              : undefined;
 
                         return (
                           <div
                             key={pane.id}
                             className={`terminal-tab-content ${isActivePane ? "active" : ""}${draggingPaneId === pane.id ? " dragging" : ""}`}
+                            style={
+                              flexShare !== undefined
+                                ? {
+                                    flex: `${flexShare} 1 0`,
+                                    minWidth: 0,
+                                    minHeight: 0,
+                                    display: "flex",
+                                    flexDirection: "column",
+                                    overflow: "hidden",
+                                  }
+                                : undefined
+                            }
                             onClick={() => {
                               setActiveTerminalId(tab.id);
                               updateWorkspaceTab(tab.id, (currentTab) => ({
@@ -1493,6 +1998,14 @@ Working directory: ${currentDir || "unknown"}`;
         </div>
 
         <div className="status-right">
+          <button
+            type="button"
+            className="status-item status-cmd-palette-btn"
+            onClick={() => setCommandPaletteOpen(true)}
+            title="Command palette"
+          >
+            {modShortcutLabel}K
+          </button>
           <span className="status-item">{activeTerminalTitle}</span>
           <button
             className="status-item status-theme-btn"
@@ -1504,6 +2017,13 @@ Working directory: ${currentDir || "unknown"}`;
           <span className="status-item status-brand">Velix</span>
         </div>
       </div>
+
+      <CommandPalette
+        open={commandPaletteOpen}
+        onClose={() => setCommandPaletteOpen(false)}
+        theme={theme}
+        items={commandPaletteItems}
+      />
 
       <Settings
         isOpen={showSettings}

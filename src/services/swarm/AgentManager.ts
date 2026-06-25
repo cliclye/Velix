@@ -1,21 +1,35 @@
 /**
  * AgentManager — spawns worker CLI agents in PTYs, delivers swarm prompts, and streams output.
- * Supports any configured worker CLI (Claude Code, Gemini CLI, Codex, Copilot, Velix, custom).
  *
- * Lifecycle per agent:
- *   spawning  →  launching_cli  →  working  →  (exit)
+ * Full rewrite focused on reliability:
  *
- * Each transition is guarded by checking the current phase. Timers and output-driven
- * detection both call the same idempotent transition functions, so concurrent triggers
- * are harmless — the first one wins, the rest are no-ops.
+ *   1. A single well-defined lifecycle per agent:
+ *          spawning  →  launching_cli  →  working  →  exiting  →  (exit)
+ *      Each transition is idempotent: the first caller wins, the rest no-op.
  *
- * Timers are plain setTimeout (never stored/cancelled). They simply check the phase
- * when they fire and bail if the agent has already moved past the expected phase.
- * This eliminates the entire category of bugs where timers get cancelled too early
- * by exit events or other state cleanup.
+ *   2. Prompt delivery uses terminal bracketed-paste sequences so interactive
+ *      CLIs (Claude Code, Gemini CLI, Codex, …) reliably receive multi-line
+ *      prompts and treat the trailing CR as "submit".
+ *
+ *   3. Timers are plain setTimeout / setInterval. They check the current phase
+ *      when they fire and bail if the agent has already moved on. No timer
+ *      cancellation gymnastics.
+ *
+ *   4. `pty_kill` in the Rust backend now actually kills the child process,
+ *      so PTY exit reliably fires when we ask the CLI to quit.
+ *
+ *   5. Extensive console.log so the user can see exactly where each agent is
+ *      in the launch sequence. The swarm has been hard to debug historically
+ *      because the logs were too quiet.
  */
 
-import { invoke, listen, type UnlistenFn, writeTextFile, remove } from '../../platform/native';
+import {
+  invoke,
+  listen,
+  type UnlistenFn,
+  writeTextFile,
+  remove,
+} from '../../platform/native';
 import {
   Agent,
   AgentRole,
@@ -28,10 +42,12 @@ import { SwarmEventEmitter } from './SwarmEventEmitter';
 import { aiService } from '../ai/AIService';
 
 // ---------------------------------------------------------------------------
-// Payload parsing — Tauri emits snake_case; tolerate camelCase if serialization changes
+// Payload parsing — Tauri emits snake_case; tolerate camelCase defensively
 // ---------------------------------------------------------------------------
 
-function parsePtyOutputPayload(payload: unknown): { sessionId: string; data: string } | null {
+function parsePtyOutputPayload(
+  payload: unknown,
+): { sessionId: string; data: string } | null {
   if (payload === null || typeof payload !== 'object') return null;
   const p = payload as Record<string, unknown>;
   const sid = p.session_id ?? p.sessionId;
@@ -59,38 +75,49 @@ function parsePtyExitPayload(
 }
 
 // ---------------------------------------------------------------------------
-// Constants
+// Tunables
 // ---------------------------------------------------------------------------
 
 const MAX_OUTPUT_BUFFER = 500;
 const MAX_TERMINAL_OUTPUT_CHARS = 250_000;
-const READY_ACCUMULATOR_MAX_CHARS = 2000;
+const READY_ACCUMULATOR_MAX_CHARS = 4000;
 
-/**
- * How long to wait after PTY creation before writing the CLI launch command.
- * This gives the login shell time to source profiles and display a prompt.
- * Output-driven detection can trigger the transition earlier.
- */
-const CLI_LAUNCH_DELAY_MS = 3500;
+/** Fallback delay before writing the CLI start command. Output-driven
+ *  shell-prompt detection can trigger earlier. */
+const CLI_LAUNCH_FALLBACK_MS = 4_000;
 
-/**
- * How long to wait after the CLI command is written before delivering the prompt.
- * Interactive CLIs can take 8–15 s to start on cold launch.
- * Output-driven detection can trigger the delivery earlier.
- */
-const PROMPT_DELIVERY_DELAY_MS = 20_000;
+/** Fallback delay before delivering the prompt after the CLI launches.
+ *  Interactive CLIs cold-start in 5–15s; output-driven detection usually
+ *  fires earlier than this. */
+const PROMPT_DELIVERY_FALLBACK_MS = 18_000;
+
+/** Poll interval for checking whether an agent is done. */
+const COMPLETION_POLL_INTERVAL_MS = 4_000;
+
+/** Minimum time after prompt delivery before we start checking for completion. */
+const COMPLETION_GRACE_MS = 12_000;
+
+/** Quiet-time after a completion marker before we decide "yes, really done". */
+const COMPLETION_QUIET_AFTER_MARKER_MS = 8_000;
+
+/** Absolute quiet-time without any output (no marker) before we assume stuck at idle prompt. */
+const COMPLETION_IDLE_TIMEOUT_MS = 45_000;
+
+/** Time after sending `/exit` before we force-kill the PTY. */
+const EXIT_ESCALATION_MS = 12_000;
 
 // ---------------------------------------------------------------------------
-// Agent lifecycle phases
+// Lifecycle phases
 // ---------------------------------------------------------------------------
 
-type AgentPhase = 'spawning' | 'launching_cli' | 'working';
+type AgentPhase = 'spawning' | 'launching_cli' | 'working' | 'exiting';
 
 // ---------------------------------------------------------------------------
-// Shell / CLI readiness patterns (used for optional early detection)
+// Shell / CLI readiness detection patterns
 // ---------------------------------------------------------------------------
 
-const SHELL_READY_PATTERNS = [
+/** Common shell prompts (zsh %, bash $, root #, oh-my-zsh arrows, etc.). */
+const SHELL_READY_PATTERNS: RegExp[] = [
   /%\s*$/m,
   /\$\s*$/m,
   /#\s*$/m,
@@ -98,67 +125,67 @@ const SHELL_READY_PATTERNS = [
   /➜\s*$/m,
   /›\s*$/m,
   /\[.*\][%$#]\s*$/m,
-  /\n[%$#]\s*$/m,
-  /:\s*\S+\s+%\s*$/m,
-  /\S+@\S+\s+\S+\s+%\s*$/m,
 ];
 
+/** Patterns that indicate a TUI CLI has fully loaded and is waiting for input. */
 const CLI_READY_COMMON: RegExp[] = [
-  />\s*$/m,
-  /❯\s*$/m,
-  /›\s*$/m,
-  /\?\s*$/m,
+  // Explicit prompts
   /Type your message/i,
   /Tips for getting started/i,
   /awaiting (your )?(input|message|reply)/i,
   /Press enter to continue/i,
-];
-const CLI_READY_HINTS_CLAUDE: RegExp[] = [
+  // Claude Code's rounded bottom border appears once the TUI is mounted
   /╰─+╯/,
-  // Claude 2.x uses several dingbat stars; timing lines may insert box-drawing between glyphs
-  /[✢✻✦✳✽][\s\u2500-\u257F]{0,40}[^\n]{0,160}?\bfor\s+/i,
+  // Several TUIs draw a chevron or arrow on the input line
+  /›\s*$/m,
+  /❯\s*$/m,
+  /▎\s*$/m,
 ];
-const CLI_READY_HINTS_GEMINI: RegExp[] = [/gemini\s+cli/i, /google\s+gemini/i];
-const CLI_READY_HINTS_CODEX: RegExp[] = [/openai\s*codex/i, /\bcodex\b.*[>›:?]/i];
-const CLI_READY_HINTS_COPILOT: RegExp[] = [/github\s*copilot/i, /copilot\s*cli/i];
-const CLI_READY_HINTS_VELIX: RegExp[] = [/\bvelix\b.*[>›:?]/i];
+
+const CLI_READY_HINTS_CLAUDE: RegExp[] = [
+  /[✢✻✦✳✽]/,
+  /Welcome to Claude/i,
+];
+const CLI_READY_HINTS_GEMINI: RegExp[] = [/gemini/i, /google/i];
+const CLI_READY_HINTS_CODEX: RegExp[] = [/codex/i];
+const CLI_READY_HINTS_COPILOT: RegExp[] = [/copilot/i];
+const CLI_READY_HINTS_VELIX: RegExp[] = [/velix/i];
 
 const BUILTIN_WORKER_CLI_IDS = new Set<string>([
-  'claude', 'gemini', 'velix', 'codex', 'copilot',
+  'claude', 'gemini', 'codex',
 ]);
 
-function mergeUniqueRegexPatterns(base: RegExp[], extras: RegExp[][]): RegExp[] {
+function mergePatterns(...groups: RegExp[][]): RegExp[] {
   const seen = new Set<string>();
   const out: RegExp[] = [];
-  const add = (list: RegExp[]) => {
-    for (const r of list) {
+  for (const group of groups) {
+    for (const r of group) {
       const key = `${r.source}\u0000${r.flags}`;
       if (seen.has(key)) continue;
       seen.add(key);
       out.push(r);
     }
-  };
-  add(base);
-  for (const list of extras) add(list);
+  }
   return out;
 }
 
 export function getCliReadyPatterns(workerCLI: WorkerCLI): RegExp[] {
-  const common = [...CLI_READY_COMMON];
   if (BUILTIN_WORKER_CLI_IDS.has(workerCLI)) {
     switch (workerCLI) {
-      case 'claude':  return mergeUniqueRegexPatterns(common, [CLI_READY_HINTS_CLAUDE]);
-      case 'gemini':  return mergeUniqueRegexPatterns(common, [CLI_READY_HINTS_GEMINI]);
-      case 'codex':   return mergeUniqueRegexPatterns(common, [CLI_READY_HINTS_CODEX]);
-      case 'copilot': return mergeUniqueRegexPatterns(common, [CLI_READY_HINTS_COPILOT]);
-      case 'velix':   return mergeUniqueRegexPatterns(common, [CLI_READY_HINTS_VELIX]);
-      default:        return common;
+      case 'claude':  return mergePatterns(CLI_READY_COMMON, CLI_READY_HINTS_CLAUDE);
+      case 'gemini':  return mergePatterns(CLI_READY_COMMON, CLI_READY_HINTS_GEMINI);
+      case 'codex':   return mergePatterns(CLI_READY_COMMON, CLI_READY_HINTS_CODEX);
+      default:        return CLI_READY_COMMON;
     }
   }
-  return mergeUniqueRegexPatterns(common, [
-    CLI_READY_HINTS_CLAUDE, CLI_READY_HINTS_GEMINI,
-    CLI_READY_HINTS_CODEX, CLI_READY_HINTS_COPILOT, CLI_READY_HINTS_VELIX,
-  ]);
+  return mergePatterns(
+    CLI_READY_COMMON,
+    CLI_READY_HINTS_CLAUDE,
+    CLI_READY_HINTS_GEMINI,
+    CLI_READY_HINTS_CODEX,
+    CLI_READY_HINTS_COPILOT,
+    CLI_READY_HINTS_VELIX,
+  );
 }
 
 // ---------------------------------------------------------------------------
@@ -167,15 +194,231 @@ export function getCliReadyPatterns(workerCLI: WorkerCLI): RegExp[] {
 
 const ANSI_ESCAPE_REGEX = /\u001B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])|\u009B[0-?]*[ -/]*[@-~]/g;
 
-const sanitizeTerminalOutput = (data: string): string =>
-  data
+function sanitizeTerminalOutput(data: string): string {
+  return data
     .replace(/\r\n/g, '\n')
     .replace(/\r/g, '\n')
     .replace(ANSI_ESCAPE_REGEX, '')
     .replace(/[\u0000-\u0008\u000B-\u001A\u001C-\u001F\u007F]/g, '');
+}
 
 // ---------------------------------------------------------------------------
-// Worker CLI configuration (options, detection, persistence)
+// Completion markers — any one of these plus a quiet PTY means "the CLI is done"
+// ---------------------------------------------------------------------------
+
+const COMPLETION_MARKERS: RegExp[] = [
+  /---END-SCOUT-FINDINGS---/,
+  /---END-BUILDER-REPORT---/,
+  /---END-REVIEW-VERDICT---/,
+  // Claude Code timing/usage lines that only appear after the assistant finishes
+  /\b(Baked|Brewed|Worked|Churned|Cogitated|Processed|Finished)\s+for\s+/i,
+  // Claude Code prints this once the CLI has fully exited back to the shell
+  /Resume this session with:/i,
+  // Some CLIs print this on successful completion
+  /^\s*Done\.\s*$/m,
+];
+
+function hasCompletionMarker(text: string): boolean {
+  return COMPLETION_MARKERS.some((r) => r.test(text));
+}
+
+function hasJsonFence(text: string): boolean {
+  return /```json\s*[\s\S]*?```/i.test(text);
+}
+
+function isParseableJsonObject(text: string): boolean {
+  if (!text) return false;
+  try {
+    const parsed = JSON.parse(text);
+    return parsed !== null && typeof parsed === 'object' && !Array.isArray(parsed);
+  } catch {
+    return false;
+  }
+}
+
+type JsonCompletionShape = 'plan' | 'actions' | 'any';
+
+function satisfiesJsonShape(text: string, shape: JsonCompletionShape): boolean {
+  if (shape === 'any') {
+    const jsonText = extractLastJsonObjectText(text);
+    return (jsonText !== null && isParseableJsonObject(jsonText)) || hasJsonFence(text);
+  }
+
+  const jsonText = extractLastJsonObjectText(text);
+  if (!jsonText) return false;
+  try {
+    const parsed = JSON.parse(jsonText) as Record<string, unknown>;
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return false;
+    if (shape === 'plan') {
+      return Array.isArray(parsed.tasks) && parsed.tasks.length > 0;
+    }
+    if (shape === 'actions') {
+      return Array.isArray(parsed.actions) && parsed.actions.length > 0;
+    }
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function escapeRegExp(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+function findMarkerLine(
+  text: string,
+  marker: string,
+  fromIndex = 0,
+): { contentStart: number; afterLine: number } | null {
+  const regex = new RegExp(`(^|\\n)[\\t ]*${escapeRegExp(marker)}[\\t ]*(\\n|$)`, 'g');
+  regex.lastIndex = fromIndex;
+  const match = regex.exec(text);
+  if (!match) return null;
+  return {
+    contentStart: match.index + match[1].length,
+    afterLine: match.index + match[0].length,
+  };
+}
+
+function extractBalancedJsonObject(text: string, start: number): string | null {
+  if (text[start] !== '{') return null;
+  let depth = 0;
+  let inString = false;
+  let escaped = false;
+  for (let i = start; i < text.length; i++) {
+    const ch = text[i];
+    if (inString) {
+      if (escaped) escaped = false;
+      else if (ch === '\\') escaped = true;
+      else if (ch === '"') inString = false;
+      continue;
+    }
+    if (ch === '"') {
+      inString = true;
+      continue;
+    }
+    if (ch === '{') depth += 1;
+    else if (ch === '}') {
+      depth -= 1;
+      if (depth === 0) return text.slice(start, i + 1);
+    }
+  }
+  return null;
+}
+
+function collectResponseCandidates(
+  text: string,
+  startMarker: string,
+  endMarker: string,
+): string[] {
+  const candidates: string[] = [];
+  const delimited = extractDelimitedResult(text, startMarker, endMarker);
+  if (delimited) candidates.push(delimited);
+
+  for (const match of text.matchAll(/```json\s*([\s\S]*?)```/gi)) {
+    candidates.push(match[1].trim());
+  }
+  for (const match of text.matchAll(/```(?:\w+)?\s*([\s\S]*?)```/g)) {
+    candidates.push(match[1].trim());
+  }
+
+  const actionsIdx = text.indexOf('"actions"');
+  if (actionsIdx >= 0) {
+    const start = text.lastIndexOf('{', actionsIdx);
+    if (start >= 0) {
+      const slice = extractBalancedJsonObject(text, start);
+      if (slice) candidates.push(slice);
+    }
+  }
+
+  const tasksIdx = text.indexOf('"tasks"');
+  if (tasksIdx >= 0) {
+    const start = text.lastIndexOf('{', tasksIdx);
+    if (start >= 0) {
+      const slice = extractBalancedJsonObject(text, start);
+      if (slice) candidates.push(slice);
+    }
+  }
+
+  const lastJson = extractLastJsonObjectText(text);
+  if (lastJson) candidates.push(lastJson);
+
+  candidates.push(text.trim());
+  return [...new Set(candidates.filter(Boolean))];
+}
+
+function pickValidatedResult(
+  text: string,
+  validate: (candidate: string) => boolean,
+  startMarker: string,
+  endMarker: string,
+): string | null {
+  for (const candidate of collectResponseCandidates(text, startMarker, endMarker)) {
+    if (validate(candidate)) return candidate;
+  }
+  return null;
+}
+
+function extractDelimitedResult(text: string, startMarker: string, endMarker: string): string | null {
+  const start = findMarkerLine(text, startMarker);
+  if (!start) return null;
+  const end = findMarkerLine(text, endMarker, start.afterLine);
+  if (!end) return null;
+  return text.slice(start.afterLine, end.contentStart).trim();
+}
+
+function extractLastJsonObjectText(text: string): string | null {
+  let start = -1;
+  let depth = 0;
+  let inString = false;
+  let escaped = false;
+  let lastJson: string | null = null;
+
+  for (let i = 0; i < text.length; i++) {
+    const char = text[i];
+
+    if (inString) {
+      if (escaped) {
+        escaped = false;
+      } else if (char === '\\') {
+        escaped = true;
+      } else if (char === '"') {
+        inString = false;
+      }
+      continue;
+    }
+
+    if (char === '"') {
+      inString = true;
+      continue;
+    }
+
+    if (char === '{') {
+      if (depth === 0) start = i;
+      depth++;
+      continue;
+    }
+
+    if (char !== '}' || depth === 0) continue;
+
+    depth--;
+    if (depth !== 0 || start === -1) continue;
+
+    const candidate = text.slice(start, i + 1).trim();
+    try {
+      JSON.parse(candidate);
+      lastJson = candidate;
+    } catch {
+      // Ignore non-JSON brace blocks from echoed prompts or terminal output.
+    }
+    start = -1;
+  }
+
+  return lastJson;
+}
+
+// ---------------------------------------------------------------------------
+// Worker CLI configuration (built-ins + custom + availability detection)
 // ---------------------------------------------------------------------------
 
 export interface WorkerCLIOption {
@@ -189,9 +432,7 @@ export interface WorkerCLIOption {
 const BUILTIN_CLI_OPTIONS: WorkerCLIOption[] = [
   { id: 'claude',  name: 'Claude Code', command: 'claude',  description: 'Anthropic Claude Code CLI', builtin: true },
   { id: 'gemini',  name: 'Gemini CLI',  command: 'gemini',  description: 'Google Gemini terminal agent', builtin: true },
-  { id: 'velix',   name: 'Velix CLI',   command: 'velix',   description: 'Velix AI CLI', builtin: true },
   { id: 'codex',   name: 'Codex CLI',   command: 'codex',   description: 'OpenAI Codex CLI', builtin: true },
-  { id: 'copilot', name: 'Copilot CLI', command: 'copilot', description: 'GitHub Copilot CLI', builtin: true },
 ];
 
 const CUSTOM_CLI_STORAGE_KEY = 'velix-custom-cli-options';
@@ -224,533 +465,157 @@ export interface WorkerCLIStatus {
   detail: string;
 }
 
+function getCommandExecutable(command: string): string {
+  const trimmed = command.trim();
+  const match = trimmed.match(/^(?:"([^"]+)"|'([^']+)'|(\S+))/);
+  return match?.[1] || match?.[2] || match?.[3] || trimmed;
+}
+
 export async function detectWorkerCLIAvailability(
   _cwd: string,
 ): Promise<Record<WorkerCLI, WorkerCLIStatus>> {
   const allOptions = getWorkerCLIOptions();
   const entries = await Promise.all(
     allOptions.map(async (option) => {
+      const executable = getCommandExecutable(option.command);
       try {
-        const path = await invoke<string>('check_cli_available', { command: option.command });
+        const path = await invoke<string>('check_cli_available', { command: executable });
         return [option.id, { available: true, detail: path }] as const;
       } catch {
-        return [option.id, { available: false, detail: 'Not found in PATH' }] as const;
+        return [option.id, { available: false, detail: `${executable} not found in PATH` }] as const;
       }
     }),
   );
   return Object.fromEntries(entries) as Record<WorkerCLI, WorkerCLIStatus>;
 }
 
+export interface CoordinatorCliRunOptions {
+  label?: string;
+  timeoutMs?: number;
+  signal?: AbortSignal;
+  /** Complete once a parseable JSON object appears (agent loop planner/coder). */
+  expectJson?: boolean;
+  /** Require a specific JSON shape before completing (avoids waiting on CLI UI spinners). */
+  jsonShape?: 'plan' | 'actions' | 'any';
+  validateResult?: (text: string) => boolean;
+  onProgress?: (message: string) => void;
+}
+
 // ---------------------------------------------------------------------------
 // AgentManager
 // ---------------------------------------------------------------------------
 
+interface AgentRuntimeState {
+  phase: AgentPhase;
+  pendingPrompt: string;
+  launchCommand: string;
+  cliLaunchedAt: number;
+  promptDeliveredAt: number;
+  outputAccumulator: string;
+  /** Latest rolling chunk of sanitized output, scanned for completion markers. */
+  completionWindow: string;
+  /** Set true once we've written `/exit` (or equivalent) so we know to fall back to kill. */
+  exitRequested: boolean;
+  /** Set true when we issue `pty_kill` after a clean completion, so the resulting
+   *  exit code is treated as success regardless of what the CLI returned. */
+  forcedKillAfterCompletion: boolean;
+  /** setInterval handle for completion polling. */
+  completionTimer: ReturnType<typeof setInterval> | null;
+  /** setTimeout handle for the kill-after-exit fallback. */
+  exitKillTimer: ReturnType<typeof setTimeout> | null;
+  /** Fallback timer for CLI launch. */
+  launchTimer: ReturnType<typeof setTimeout> | null;
+  /** Fallback timer for prompt delivery. */
+  promptTimer: ReturnType<typeof setTimeout> | null;
+}
+
 export class AgentManager {
-  private agents: Map<string, Agent> = new Map();
+  private agents = new Map<string, Agent>();
+  private runtime = new Map<string, AgentRuntimeState>();
+  private sessionToAgent = new Map<string, string>();
+
   private eventEmitter: SwarmEventEmitter;
+  /** Active coordinator PTY sessions (not in agents map). */
+  private coordinatorSessions = new Set<string>();
   private workspacePath: string;
   private workerCLI: WorkerCLI = 'claude';
 
-  private globalOutputListener: UnlistenFn | null = null;
-  private globalExitListener: UnlistenFn | null = null;
+  private outputListener: UnlistenFn | null = null;
+  private exitListener: UnlistenFn | null = null;
+  private initPromise: Promise<void> | null = null;
+
   private outputCallbacks: Array<(agentId: string, data: string) => void> = [];
   private exitCallbacks: Array<(agentId: string, exitCode: number | null) => void> = [];
   private spawnCallbacks: Array<(agentId: string) => void> = [];
   private patternDetector: ((output: string) => PatternMatch | null) | null = null;
-
-  private pendingPrompts: Map<string, string> = new Map();
-  private agentPhase: Map<string, AgentPhase> = new Map();
-  private outputAccumulator: Map<string, string> = new Map();
-  private cliLaunchedAt: Map<string, number> = new Map();
-  private promptDeliveredAt: Map<string, number> = new Map();
-  private completionTimers: Map<string, ReturnType<typeof setTimeout>> = new Map();
-
-  /**
-   * After `/exit`, Claude often returns to the login shell; the PTY stays open until the shell
-   * exits, so `pty-exit` never fires and the swarm waits forever. We escalate: shell `exit`, then kill.
-   */
-  private exitEscalationTimers = new Map<
-    string,
-    { shell?: ReturnType<typeof setTimeout>; kill?: ReturnType<typeof setTimeout> }
-  >();
-
-  /** Set before `pty_kill` from post-`/exit` escalation so exit code is treated as success. */
-  private completionForcedKill = new Set<string>();
-
-  private initPromise: Promise<void> | null = null;
 
   constructor(eventEmitter: SwarmEventEmitter, workspacePath: string) {
     this.eventEmitter = eventEmitter;
     this.workspacePath = workspacePath;
   }
 
-  setWorkerCLI(workerCLI: WorkerCLI): void { this.workerCLI = workerCLI; }
-  getWorkerCLI(): WorkerCLI { return this.workerCLI; }
-
-  // -----------------------------------------------------------------------
-  // Initialization — global PTY event listeners (idempotent)
-  // -----------------------------------------------------------------------
-
-  async initialize(): Promise<void> {
-    if (this.initPromise) return this.initPromise;
-
-    this.initPromise = (async () => {
-      this.globalOutputListener = await listen<unknown>('pty-output', (event) => {
-        const parsed = parsePtyOutputPayload(event.payload);
-        if (!parsed) return;
-        const agent = this.findAgentBySessionId(parsed.sessionId);
-        if (agent) {
-          void this.handleAgentOutput(agent.id, parsed.data).catch((err) => {
-            console.error('AgentManager: output handler error:', err);
-          });
-        }
-      });
-
-      this.globalExitListener = await listen<unknown>('pty-exit', (event) => {
-        const parsed = parsePtyExitPayload(event.payload);
-        if (!parsed) return;
-        const agent = this.findAgentBySessionId(parsed.sessionId);
-        if (agent) {
-          this.handleAgentExit(agent.id, parsed.exitCode);
-        }
-      });
-    })();
-
-    return this.initPromise;
+  setWorkerCLI(workerCLI: WorkerCLI): void {
+    this.workerCLI = workerCLI;
   }
 
-  // -----------------------------------------------------------------------
-  // Cleanup
-  // -----------------------------------------------------------------------
-
-  async cleanup(): Promise<void> {
-    this.initPromise = null;
-    if (this.globalOutputListener) { this.globalOutputListener(); this.globalOutputListener = null; }
-    if (this.globalExitListener)   { this.globalExitListener();   this.globalExitListener = null; }
-    this.agentPhase.clear();
-    this.pendingPrompts.clear();
-    this.outputAccumulator.clear();
-    this.cliLaunchedAt.clear();
-    this.promptDeliveredAt.clear();
-    for (const t of this.completionTimers.values()) {
-      clearInterval(t as unknown as ReturnType<typeof setInterval>);
-      clearTimeout(t);
-    }
-    this.completionTimers.clear();
-    for (const id of this.exitEscalationTimers.keys()) {
-      this.clearExitEscalation(id);
-    }
-    this.completionForcedKill.clear();
+  getWorkerCLI(): WorkerCLI {
+    return this.workerCLI;
   }
 
   setPatternDetector(detector: (output: string) => PatternMatch | null): void {
     this.patternDetector = detector;
   }
 
-  private findAgentBySessionId(sessionId: string): Agent | undefined {
-    for (const agent of this.agents.values()) {
-      if (agent.sessionId === sessionId) return agent;
-    }
-    return undefined;
-  }
-
   // -----------------------------------------------------------------------
-  // Phase transitions — idempotent, safe for concurrent calls
+  // Initialization & cleanup
   // -----------------------------------------------------------------------
 
-  /**
-   * Transition from 'spawning' → 'launching_cli'.
-   * Writes the CLI start command to the PTY.
-   * Called by both the fallback timer and output-driven shell detection.
-   * Only the first call wins; subsequent calls are no-ops.
-   */
-  private async tryLaunchCli(agentId: string): Promise<void> {
-    if (this.agentPhase.get(agentId) !== 'spawning') return;
-    const agent = this.agents.get(agentId);
-    if (!agent || agent.status === 'terminated' || agent.status === 'failed') return;
+  async initialize(): Promise<void> {
+    if (this.initPromise) return this.initPromise;
 
-    this.agentPhase.set(agentId, 'launching_cli');
-    this.cliLaunchedAt.set(agentId, Date.now());
-    this.outputAccumulator.set(agentId, '');
-    agent.cliLaunched = true;
-
-    const startCommand = this.buildWorkerStartCommand();
-    console.log(`AgentManager: launching CLI "${this.workerCLI}" for ${agentId}`);
-
-    try {
-      await invoke('pty_write', { sessionId: agent.sessionId, data: startCommand });
-    } catch (err) {
-      console.error(`AgentManager: pty_write failed (CLI launch) for ${agentId}:`, err);
-    }
-
-    // Arm prompt delivery fallback — plain setTimeout, checks phase when it fires
-    setTimeout(() => {
-      void this.tryDeliverPrompt(agentId).catch(console.error);
-    }, PROMPT_DELIVERY_DELAY_MS);
-  }
-
-  /**
-   * Transition from 'launching_cli' → 'working'.
-   * Writes the short instruction prompt to the PTY.
-   * Called by both the fallback timer and output-driven CLI detection.
-   */
-  private async tryDeliverPrompt(agentId: string): Promise<void> {
-    if (this.agentPhase.get(agentId) !== 'launching_cli') return;
-    const agent = this.agents.get(agentId);
-    if (!agent || agent.status === 'terminated' || agent.status === 'failed') return;
-
-    const prompt = this.pendingPrompts.get(agentId);
-    if (!prompt) return;
-
-    this.agentPhase.set(agentId, 'working');
-    this.pendingPrompts.delete(agentId);
-    this.promptDeliveredAt.set(agentId, Date.now());
-    agent.promptDelivered = true;
-
-    console.log(`AgentManager: delivering prompt to ${agentId}`);
-
-    try {
-      // Write the prompt text first, then send Enter separately.
-      // Interactive CLIs (Claude Code, Gemini, etc.) use bracketed paste mode —
-      // if we send `text\r` in one write, the \r is absorbed into the paste
-      // content and the CLI never actually submits. Splitting into two writes
-      // with a short gap ensures the Enter is processed as a keypress.
-      await invoke('pty_write', { sessionId: agent.sessionId, data: prompt });
-      await new Promise((r) => setTimeout(r, 300));
-      await invoke('pty_write', { sessionId: agent.sessionId, data: '\r' });
-    } catch (err) {
-      console.error(`AgentManager: prompt delivery failed for ${agentId}:`, err);
-    }
-  }
-
-  // -----------------------------------------------------------------------
-  // Completion detection — poll every 5s; scan terminal output (not just line buffer)
-  // -----------------------------------------------------------------------
-
-  /**
-   * Claude Code completion timing lines (stars ✻✦✳ + "… for …"). Do not require digits after "for" —
-   * redraws often splice in "/btw", tips, or partial columns so `Brewed for  /btw` never matches `[\dms]+`.
-   * Swarm prompts also require explicit ---END-…--- blocks; those are higher-signal than timing lines.
-   */
-  private static readonly CLI_DONE_MARKERS: RegExp[] = [
-    /[✢✻✦✳✽][\s\u2500-\u257F]{0,48}[^\n]{0,320}?\bfor\s+/i,
-    /\b(Baked|Brewed|Worked|Churned|Cogitated)\s+for\s+/i,
-    /---END-SCOUT-FINDINGS---/,
-    /---END-BUILDER-REPORT---/,
-    /---END-REVIEW-VERDICT---/,
-    // Printed when Claude Code has already quit; user is back at the login shell
-    /Resume this session with:/i,
-  ];
-
-  /** Prompt/input idle — Claude Code primary prompt (not ASCII >). */
-  private static readonly CLI_IDLE_TAIL_PATTERNS: RegExp[] = [
-    /❯\s*$/m,
-    /❯\s*\n\s*$/m,
-    /^❯\s*$/m,
-    />\s*$/m,
-    /›\s*$/m,
-    // zsh default / themes often end with % when Claude has exited to the shell
-    /%\s*$/m,
-  ];
-
-  /**
-   * True if Claude-style "task finished" timing line appears anywhere in text.
-   * Scans full sanitized terminal tail so lines scrolled out of outputBuffer still match.
-   */
-  private static hasCliDoneMarker(text: string): boolean {
-    return AgentManager.CLI_DONE_MARKERS.some((re) => re.test(text));
-  }
-
-  /**
-   * True if the session looks parked at an input prompt (tail of recent output).
-   */
-  private static looksIdleAtPrompt(text: string, workerCLI: WorkerCLI): boolean {
-    const tail = text.slice(-20000);
-    // Claude has fully quit; remaining output is shell + resume hint — not "busy inside Claude"
-    if (/Resume this session with:/i.test(tail)) return true;
-    if (AgentManager.CLI_IDLE_TAIL_PATTERNS.some((re) => re.test(tail))) return true;
-    return getCliReadyPatterns(workerCLI).some((p) => p.test(tail));
-  }
-
-  private startCompletionPolling(agentId: string): void {
-    if (this.completionTimers.has(agentId)) return;
-
-    const poll = setInterval(() => {
-      const agent = this.agents.get(agentId);
-      if (!agent || agent.status !== 'running') {
-        clearInterval(poll);
-        this.completionTimers.delete(agentId);
-        return;
-      }
-      if (this.agentPhase.get(agentId) !== 'working') return;
-
-      const deliveredAt = this.promptDeliveredAt.get(agentId) || 0;
-      if (Date.now() - deliveredAt < 15_000) return;
-
-      // Full text: line buffer + sanitized terminal replay (done line may scroll off 500-line buffer)
-      const bufText = agent.outputBuffer.join('\n');
-      const termSan = sanitizeTerminalOutput(agent.terminalOutput.slice(-120_000));
-      const scanText = `${bufText}\n${termSan}`;
-
-      const hasDone = AgentManager.hasCliDoneMarker(scanText);
-      const idle = AgentManager.looksIdleAtPrompt(termSan, this.workerCLI);
-      const quietMs = Date.now() - agent.lastActivityAt.getTime();
-
-      // Primary: done marker + idle prompt in tail
-      if (hasDone && idle) {
-        console.log(`AgentManager: ${agentId} done + idle — quitting CLI and escalating shell exit`);
-        clearInterval(poll);
-        this.completionTimers.delete(agentId);
-        this.sendCliQuitAndEscalateShellExit(agentId);
-        return;
-      }
-
-      // Fallback: saw done marker, PTY quiet for 12s (CLI finished, prompt may not match regex)
-      if (hasDone && quietMs >= 12_000) {
-        console.log(`AgentManager: ${agentId} done marker + quiet ${quietMs}ms — quitting CLI and escalating`);
-        clearInterval(poll);
-        this.completionTimers.delete(agentId);
-        this.sendCliQuitAndEscalateShellExit(agentId);
-        return;
-      }
-
-      // Last resort: idle-looking tail + no PTY activity 20s (sitting at prompt after work)
-      if (idle && quietMs >= 20_000 && Date.now() - deliveredAt > 60_000) {
-        console.log(`AgentManager: ${agentId} idle + quiet 20s + working 60s — quitting CLI and escalating`);
-        clearInterval(poll);
-        this.completionTimers.delete(agentId);
-        this.sendCliQuitAndEscalateShellExit(agentId);
-      }
-    }, 5000);
-
-    this.completionTimers.set(agentId, poll as unknown as ReturnType<typeof setTimeout>);
-  }
-
-  private cancelCompletionTimer(agentId: string): void {
-    const timer = this.completionTimers.get(agentId);
-    if (timer) {
-      clearInterval(timer as unknown as ReturnType<typeof setInterval>);
-      clearTimeout(timer);
-      this.completionTimers.delete(agentId);
-    }
-  }
-
-  private clearExitEscalation(agentId: string): void {
-    const t = this.exitEscalationTimers.get(agentId);
-    if (!t) return;
-    if (t.shell) clearTimeout(t.shell);
-    if (t.kill) clearTimeout(t.kill);
-    this.exitEscalationTimers.delete(agentId);
-  }
-
-  /**
-   * Quit Claude (`/exit`), then close the shell and finally kill the PTY so the swarm can continue.
-   * If Claude has already exited (see "Resume this session with:"), `/exit` goes to zsh as a bogus path,
-   * spams errors, and keeps refreshing `lastActivityAt` — so we only send `exit` to the shell.
-   */
-  private sendCliQuitAndEscalateShellExit(agentId: string): void {
-    const agent = this.agents.get(agentId);
-    if (!agent || agent.status !== 'running') return;
-
-    this.clearExitEscalation(agentId);
-    const termSan = sanitizeTerminalOutput(agent.terminalOutput);
-    const alreadyAtShell = /Resume this session with:/i.test(termSan);
-
-    if (alreadyAtShell) {
-      console.log(`AgentManager: ${agentId} Claude already exited — closing shell (skipping /exit)`);
-      void invoke('pty_write', { sessionId: agent.sessionId, data: 'exit\r' }).catch(() => {});
-      const killTimer = setTimeout(() => {
-        this.exitEscalationTimers.delete(agentId);
-        const a = this.agents.get(agentId);
-        if (!a || a.status !== 'running') return;
-        console.warn(`AgentManager: ${agentId} PTY still open after shell exit — forcing kill`);
-        this.completionForcedKill.add(agentId);
-        void invoke('pty_kill', { sessionId: a.sessionId }).catch((err) => {
-          this.completionForcedKill.delete(agentId);
-          console.error(`AgentManager: pty_kill after completion failed for ${agentId}:`, err);
-        });
-      }, 14_000);
-      this.exitEscalationTimers.set(agentId, { kill: killTimer });
-      return;
-    }
-
-    void invoke('pty_write', { sessionId: agent.sessionId, data: '/exit\r' }).catch(() => {});
-
-    const shellTimer = setTimeout(() => {
-      const a = this.agents.get(agentId);
-      if (!a || a.status !== 'running') return;
-      console.log(`AgentManager: ${agentId} still open after /exit — sending shell exit`);
-      void invoke('pty_write', { sessionId: a.sessionId, data: 'exit\r' }).catch(() => {});
-    }, 8_000);
-
-    const killTimer = setTimeout(() => {
-      this.exitEscalationTimers.delete(agentId);
-      const a = this.agents.get(agentId);
-      if (!a || a.status !== 'running') return;
-      console.warn(`AgentManager: ${agentId} PTY still open — forcing kill so swarm can continue`);
-      this.completionForcedKill.add(agentId);
-      void invoke('pty_kill', { sessionId: a.sessionId }).catch((err) => {
-        this.completionForcedKill.delete(agentId);
-        console.error(`AgentManager: pty_kill after completion failed for ${agentId}:`, err);
+    this.initPromise = (async () => {
+      this.outputListener = await listen<unknown>('pty-output', (event) => {
+        const parsed = parsePtyOutputPayload(event.payload);
+        if (!parsed) return;
+        const agentId = this.sessionToAgent.get(parsed.sessionId);
+        if (agentId) this.handleAgentOutput(agentId, parsed.data);
       });
-    }, 22_000);
 
-    this.exitEscalationTimers.set(agentId, { shell: shellTimer, kill: killTimer });
-  }
-
-  // -----------------------------------------------------------------------
-  // PTY output handler
-  // -----------------------------------------------------------------------
-
-  private async handleAgentOutput(agentId: string, data: string): Promise<void> {
-    const agent = this.agents.get(agentId);
-    if (!agent) return;
-
-    agent.lastActivityAt = new Date();
-    agent.terminalOutput = (agent.terminalOutput + data).slice(-MAX_TERMINAL_OUTPUT_CHARS);
-
-    const sanitized = sanitizeTerminalOutput(data);
-    const phase = this.agentPhase.get(agentId);
-
-    // Accumulate sanitized output for pattern matching during launch
-    if (phase === 'spawning' || phase === 'launching_cli') {
-      const prev = this.outputAccumulator.get(agentId) || '';
-      this.outputAccumulator.set(agentId, (prev + sanitized).slice(-READY_ACCUMULATOR_MAX_CHARS));
-    }
-
-    // Re-read phase after each await since tryLaunchCli/tryDeliverPrompt change it
-    let currentPhase = this.agentPhase.get(agentId);
-
-    if (currentPhase === 'spawning') {
-      const accumulated = this.outputAccumulator.get(agentId) || '';
-      if (SHELL_READY_PATTERNS.some((p) => p.test(accumulated))) {
-        console.log(`AgentManager: shell ready detected for ${agentId} — launching CLI early`);
-        await this.tryLaunchCli(agentId);
-        currentPhase = this.agentPhase.get(agentId);
-      }
-    }
-
-    if (currentPhase === 'launching_cli') {
-      const launchedAt = this.cliLaunchedAt.get(agentId) || 0;
-      if (Date.now() - launchedAt > 2000) {
-        const accumulated = this.outputAccumulator.get(agentId) || '';
-        const patterns = getCliReadyPatterns(this.workerCLI);
-        if (patterns.some((p) => p.test(accumulated))) {
-          console.log(`AgentManager: CLI ready detected for ${agentId} — delivering prompt early`);
-          await this.tryDeliverPrompt(agentId);
-          currentPhase = this.agentPhase.get(agentId);
-        }
-      }
-    }
-
-    // Add to sanitized line buffer (before completion poll so scans see latest chunk)
-    const lines = sanitized.split('\n').map((line) => line.trimEnd());
-    agent.outputBuffer.push(...lines);
-    if (agent.outputBuffer.length > MAX_OUTPUT_BUFFER) {
-      agent.outputBuffer = agent.outputBuffer.slice(-MAX_OUTPUT_BUFFER);
-    }
-
-    if (currentPhase === 'working') {
-      this.startCompletionPolling(agentId);
-    }
-
-    this.eventEmitter.emitAgentEvent({ type: 'output', agentId, data: sanitized });
-
-    if (this.patternDetector) {
-      const match = this.patternDetector(sanitized);
-      if (match) {
-        agent.metrics.promptsProcessed++;
-        this.eventEmitter.emitAgentEvent({ type: 'prompt_detected', agentId, match });
-      }
-    }
-
-    for (const cb of this.outputCallbacks) {
-      try { cb(agentId, sanitized); } catch (err) { console.error('AgentManager: output callback error:', err); }
-    }
-  }
-
-  // -----------------------------------------------------------------------
-  // PTY exit handler
-  // -----------------------------------------------------------------------
-
-  private handleAgentExit(agentId: string, exitCode: number | null): void {
-    const agent = this.agents.get(agentId);
-    if (!agent) return;
-    if (agent.status === 'terminated') return;
-
-    const phase = this.agentPhase.get(agentId);
-    const aliveMs = Date.now() - agent.startedAt.getTime();
-    console.log(
-      `AgentManager: pty-exit for ${agentId} | exitCode=${exitCode} phase=${phase} aliveMs=${aliveMs} label=${agent.label}`,
-    );
-
-    this.agentPhase.delete(agentId);
-    this.pendingPrompts.delete(agentId);
-    this.outputAccumulator.delete(agentId);
-    this.cliLaunchedAt.delete(agentId);
-    this.promptDeliveredAt.delete(agentId);
-    this.cancelCompletionTimer(agentId);
-    this.clearExitEscalation(agentId);
-
-    if (agent.promptFilePath) {
-      remove(agent.promptFilePath).catch(() => {});
-    }
-
-    const rawCode = exitCode ?? 0;
-    const neverWorked = phase === 'spawning' || phase === 'launching_cli';
-    const forcedAfterCompletion = this.completionForcedKill.delete(agentId);
-    let code = neverWorked ? 0 : rawCode;
-    if (forcedAfterCompletion && phase === 'working') code = 0;
-    agent.status = code === 0 ? 'completed' : 'failed';
-
-    if (agent.status === 'failed') {
-      const aliveStr = aliveMs < 1000 ? `${aliveMs}ms` : `${(aliveMs / 1000).toFixed(1)}s`;
-      if (phase === 'working') {
-        agent.failureReason = `CLI exited with code ${rawCode} after ${aliveStr}`;
-      } else if (phase === 'launching_cli') {
-        agent.failureReason = `CLI failed to start (exit code ${rawCode}, alive ${aliveStr})`;
-      } else {
-        agent.failureReason = `Shell exited before CLI launched (exit code ${rawCode}, alive ${aliveStr})`;
-      }
-    }
-
-    if (neverWorked && rawCode !== 0) {
-      console.warn(
-        `AgentManager: ${agentId} exited with code ${rawCode} before CLI launched (phase=${phase}) — treating as completed so swarm can continue`,
-      );
-    }
-
-    if (code === 0) {
-      this.eventEmitter.emitAgentEvent({
-        type: 'completed',
-        agentId,
-        result: {
-          id: `result_${agentId}`,
-          agentId,
-          role: agent.role.type,
-          description: agent.assignedTask,
-          status: 'completed',
-          startedAt: agent.startedAt,
-          completedAt: new Date(),
-          output: this.getAgentHandoffOutput(agentId),
-          filesModified: agent.metrics.filesModified,
-        },
+      this.exitListener = await listen<unknown>('pty-exit', (event) => {
+        const parsed = parsePtyExitPayload(event.payload);
+        if (!parsed) return;
+        const agentId = this.sessionToAgent.get(parsed.sessionId);
+        if (agentId) this.handleAgentExit(agentId, parsed.exitCode);
       });
-    } else {
-      this.eventEmitter.emitAgentEvent({
-        type: 'failed',
-        agentId,
-        error: agent.failureReason || `Agent exited with code ${code}`,
-      });
-    }
 
-    for (const cb of this.exitCallbacks) {
-      try { cb(agentId, code); } catch (err) { console.error('AgentManager: exit callback error:', err); }
+      console.log('AgentManager: initialized (listeners registered)');
+    })();
+
+    return this.initPromise;
+  }
+
+  async cleanup(): Promise<void> {
+    console.log('AgentManager: cleanup()');
+    this.initPromise = null;
+    if (this.outputListener) { this.outputListener(); this.outputListener = null; }
+    if (this.exitListener)   { this.exitListener();   this.exitListener = null; }
+
+    for (const rt of this.runtime.values()) {
+      if (rt.completionTimer) clearInterval(rt.completionTimer);
+      if (rt.exitKillTimer) clearTimeout(rt.exitKillTimer);
+      if (rt.launchTimer) clearTimeout(rt.launchTimer);
+      if (rt.promptTimer) clearTimeout(rt.promptTimer);
     }
+    for (const sessionId of this.coordinatorSessions) {
+      void invoke('pty_kill', { sessionId }).catch(() => {});
+    }
+    this.coordinatorSessions.clear();
+    this.runtime.clear();
+    this.sessionToAgent.clear();
   }
 
   // -----------------------------------------------------------------------
-  // Spawn
+  // Spawn — create PTY, schedule launch & prompt delivery
   // -----------------------------------------------------------------------
 
   async spawnAgent(
@@ -765,29 +630,34 @@ export class AgentManager {
     const agentId = `agent_${Date.now()}_${Math.random().toString(36).slice(2, 11)}`;
     const sessionId = `swarm_${agentId}`;
 
-    // ── Step 1: Write prompt file BEFORE creating the PTY ──────────────
-    // This await happens before any PTY exists, so there's no race with
-    // pty-output or pty-exit events. If it fails, we fall back to inline.
-    const prompt = this.buildPrompt(role, task);
+    // ── 1. Write the full prompt to a file so the agent can read it
+    //       without us having to stream it through the PTY line-by-line.
+    const fullPrompt = this.buildPrompt(role, task);
     const promptFileName = `.velix_swarm_prompt_${agentId}.txt`;
     const promptFilePath = `${this.workspacePath}/${promptFileName}`;
-
     let promptFileOk = false;
     try {
-      await writeTextFile(promptFilePath, prompt);
+      await writeTextFile(promptFilePath, fullPrompt);
       promptFileOk = true;
     } catch (err) {
-      console.warn(`AgentManager: prompt file write failed for ${agentId}, will deliver inline:`, err);
+      console.warn(
+        `AgentManager: prompt-file write failed for ${agentId}, falling back to inline delivery:`,
+        err,
+      );
     }
-    const promptFileWritten = promptFileOk;
 
-    const noFollowUp = 'Do NOT ask follow-up questions or request clarification. Work with the information provided. Begin immediately and exit when done.';
+    const noFollowUp =
+      'Do NOT ask follow-up questions or request clarification. Work with the information provided. Begin immediately. When finished with your assigned task, quit the CLI (use /exit, /quit, or your CLI\'s exit command) so the swarm can continue.';
 
     const shortInstruction = promptFileOk
-      ? `Read the file ${promptFileName} in the current directory. It contains your full task instructions. Follow every instruction in that file exactly — do not summarize or skip anything. ${noFollowUp}`
-      : `${prompt}\n\n${noFollowUp}`;
+      ? `Read the file ./${promptFileName} in the current directory. It contains your full task instructions. Follow every instruction in that file exactly — do not summarize or skip anything. ${noFollowUp}`
+      : `${fullPrompt}\n\n${noFollowUp}`;
 
-    // ── Step 2: Create PTY — shell starts immediately ──────────────────
+    // ── 2. Create the PTY. This spawns `sh -l` with the workspace as cwd.
+    //       We deliberately launch a shell (not the CLI directly) so the
+    //       user's login environment (PATH, keys) is fully loaded before
+    //       the CLI starts.
+    console.log(`AgentManager: creating PTY for ${agentId} (cwd=${this.workspacePath})`);
     await invoke('pty_create', {
       sessionId,
       rows: 50,
@@ -795,10 +665,8 @@ export class AgentManager {
       cwd: this.workspacePath,
     });
 
-    // ── Step 3: ALL remaining setup is synchronous (no awaits) ─────────
-    // This guarantees that when handleAgentOutput fires (on the next
-    // event-loop tick), the agent, phase, prompt, and timer are all ready.
-
+    // ── 3. Register agent state synchronously so output events arriving
+    //       on the very next tick find a target to dispatch to.
     const agent: Agent = {
       id: agentId,
       role,
@@ -821,30 +689,784 @@ export class AgentManager {
         escalations: 0,
       },
       promptFilePath: promptFileOk ? promptFilePath : undefined,
-      promptFileWritten,
+      promptFileWritten: promptFileOk,
       cliLaunched: false,
       promptDelivered: false,
     };
 
+    const runtime: AgentRuntimeState = {
+      phase: 'spawning',
+      pendingPrompt: shortInstruction,
+      launchCommand: this.buildWorkerStartCommand(),
+      cliLaunchedAt: 0,
+      promptDeliveredAt: 0,
+      outputAccumulator: '',
+      completionWindow: '',
+      exitRequested: false,
+      forcedKillAfterCompletion: false,
+      completionTimer: null,
+      exitKillTimer: null,
+      launchTimer: null,
+      promptTimer: null,
+    };
+
     this.agents.set(agentId, agent);
-    this.agentPhase.set(agentId, 'spawning');
-    this.outputAccumulator.set(agentId, '');
-    this.pendingPrompts.set(agentId, shortInstruction);
+    this.runtime.set(agentId, runtime);
+    this.sessionToAgent.set(sessionId, agentId);
 
-    // Arm CLI launch fallback (plain setTimeout — checks phase when it fires)
-    setTimeout(() => {
-      void this.tryLaunchCli(agentId).catch(console.error);
-    }, CLI_LAUNCH_DELAY_MS);
+    // ── 4. Arm the fallback timers. Output-driven detection may fire earlier.
+    runtime.launchTimer = setTimeout(() => {
+      runtime.launchTimer = null;
+      void this.tryLaunchCli(agentId, 'fallback-timer');
+    }, CLI_LAUNCH_FALLBACK_MS);
+    runtime.promptTimer = setTimeout(() => {
+      runtime.promptTimer = null;
+      void this.tryDeliverPromptWhenReady(agentId, 'fallback-timer');
+    }, CLI_LAUNCH_FALLBACK_MS + PROMPT_DELIVERY_FALLBACK_MS);
 
-    console.log(`AgentManager: spawned ${agentId} (session=${sessionId}, promptFile=${promptFileOk})`);
+    console.log(
+      `AgentManager: spawned ${agentId}`,
+      `(role=${role.type}, promptFile=${promptFileOk}, sessionId=${sessionId})`,
+    );
 
     this.eventEmitter.emitAgentEvent({ type: 'spawned', agentId, role: role.type });
-
     for (const cb of this.spawnCallbacks) {
-      try { cb(agentId); } catch { /* ignore */ }
+      try { cb(agentId); } catch (err) { console.error('AgentManager: spawn cb error:', err); }
     }
 
     return agent;
+  }
+
+  async runCoordinatorPrompt(
+    prompt: string,
+    options: CoordinatorCliRunOptions = {},
+  ): Promise<string> {
+    await this.initialize();
+
+    const runId = `${Date.now()}_${Math.random().toString(36).slice(2, 10)}`;
+    const sessionId = `swarm_coordinator_${runId}`;
+    this.coordinatorSessions.add(sessionId);
+    const label = options.label || 'Coordinator';
+    const timeoutMs = options.timeoutMs ?? 180_000;
+    const expectJson = options.expectJson ?? false;
+    const jsonShape: JsonCompletionShape = options.jsonShape ?? (expectJson ? 'any' : 'any');
+    const reportProgress = (message: string) => {
+      options.onProgress?.(message);
+    };
+    const markerStart = `__VELIX_COORDINATOR_RESULT_START__${runId}`;
+    const markerEnd = `__VELIX_COORDINATOR_RESULT_END__${runId}`;
+
+    const promptWithContract = [
+      prompt,
+      '',
+      '## Coordinator CLI output contract',
+      expectJson
+        ? 'Respond with the requested JSON. Put the JSON between these exact marker lines (you may wrap it in a ```json fence inside the markers):'
+        : 'Produce the final answer between these exact marker lines:',
+      markerStart,
+      expectJson ? '```json\n{ ... }\n```' : '<final answer>',
+      markerEnd,
+      expectJson
+        ? 'The JSON between the markers must be valid and complete. After printing the end marker, exit the CLI session (/exit or equivalent).'
+        : 'The final answer between the markers must satisfy the requested format exactly. After printing the end marker, exit the CLI session.',
+    ].join('\n');
+
+    const promptFileName = `.velix_swarm_coordinator_${runId}.txt`;
+    const promptFilePath = `${this.workspacePath}/${promptFileName}`;
+    let promptFileOk = false;
+    try {
+      await writeTextFile(promptFilePath, promptWithContract);
+      promptFileOk = true;
+    } catch (err) {
+      console.warn(`AgentManager[${label}]: coordinator prompt-file write failed:`, err);
+    }
+
+    const deliveryPrompt = promptFileOk
+      ? [
+          `Read ./${promptFileName} in the current directory.`,
+          'It contains your full coordinator instructions and output contract.',
+          `Return only the final answer between ${markerStart} and ${markerEnd}.`,
+          'Begin now. Do not ask follow-up questions.',
+        ].join(' ')
+      : promptWithContract;
+
+    console.log(`AgentManager[${label}]: starting coordinator CLI "${this.workerCLI}"`);
+    reportProgress(`Starting ${label} via ${this.workerCLI} CLI…`);
+
+    return new Promise<string>(async (resolve, reject) => {
+      let output = '';
+      let sanitizedOutput = '';
+      let settled = false;
+      let cliLaunched = false;
+      let promptDelivered = false;
+      let cliLaunchedAt = 0;
+      let promptDeliveredAt = 0;
+      let lastOutputAt = Date.now();
+      let outputUnlisten: UnlistenFn | null = null;
+      let exitUnlisten: UnlistenFn | null = null;
+      let launchTimer: ReturnType<typeof setTimeout> | null = null;
+      let promptTimer: ReturnType<typeof setTimeout> | null = null;
+      let completionTimer: ReturnType<typeof setInterval> | null = null;
+      let timeoutTimer: ReturnType<typeof setTimeout> | null = null;
+      let jsonShapeStableSince = 0;
+
+      const cleanup = () => {
+        if (launchTimer) clearTimeout(launchTimer);
+        if (promptTimer) clearTimeout(promptTimer);
+        if (completionTimer) clearInterval(completionTimer);
+        if (timeoutTimer) clearTimeout(timeoutTimer);
+        options.signal?.removeEventListener('abort', onAbort);
+        outputUnlisten?.();
+        exitUnlisten?.();
+        if (promptFileOk) {
+          remove(promptFilePath).catch(() => {});
+        }
+      };
+
+      const extractResult = (): string => {
+        if (options.validateResult) {
+          const picked = pickValidatedResult(
+            sanitizedOutput,
+            options.validateResult,
+            markerStart,
+            markerEnd,
+          );
+          if (picked) return picked;
+        }
+
+        const delimitedResult = extractDelimitedResult(sanitizedOutput, markerStart, markerEnd);
+        if (delimitedResult !== null) {
+          if (!options.validateResult || options.validateResult(delimitedResult)) {
+            return delimitedResult;
+          }
+        }
+
+        if (jsonShape !== 'any') {
+          const shaped = pickValidatedResult(
+            sanitizedOutput,
+            (candidate) => satisfiesJsonShape(candidate, jsonShape),
+            markerStart,
+            markerEnd,
+          );
+          if (shaped) return shaped;
+        }
+
+        const json = extractLastJsonObjectText(sanitizedOutput);
+        if (json) return json;
+        return sanitizedOutput.trim();
+      };
+
+      const finish = (ok: boolean, error?: Error) => {
+        if (settled) return;
+        settled = true;
+        cleanup();
+        this.coordinatorSessions.delete(sessionId);
+        void invoke('pty_kill', { sessionId }).catch(() => {});
+
+        if (!ok) {
+          reject(error || new Error(`${label} CLI run failed.`));
+          return;
+        }
+
+        const result = extractResult();
+        if (!result) {
+          reject(new Error(`${label} CLI produced no coordinator output.`));
+          return;
+        }
+        if (options.validateResult && !options.validateResult(result)) {
+          reject(
+            new Error(
+              `${label} CLI response did not contain a usable result. Check the activity log and retry.`,
+            ),
+          );
+          return;
+        }
+        resolve(result);
+      };
+
+      const onAbort = () => {
+        finish(false, new DOMException('Coordinator CLI run stopped', 'AbortError'));
+      };
+
+      const tryLaunchCli = async (reason: string) => {
+        if (settled || cliLaunched) return;
+        cliLaunched = true;
+        cliLaunchedAt = Date.now();
+        sanitizedOutput = '';
+        console.log(`AgentManager[${label}]: launching coordinator CLI (${reason})`);
+        reportProgress(`Launching ${this.workerCLI} CLI…`);
+        try {
+          await invoke('pty_write', {
+            sessionId,
+            data: this.buildWorkerStartCommand(),
+          });
+        } catch (err) {
+          finish(false, new Error(`Failed to launch coordinator CLI: ${err}`));
+        }
+      };
+
+      const tryDeliverPrompt = async (reason: string) => {
+        if (settled || !cliLaunched || promptDelivered) return;
+        promptDelivered = true;
+        promptDeliveredAt = Date.now();
+        console.log(`AgentManager[${label}]: delivering coordinator prompt (${reason})`);
+        reportProgress(`${label} is thinking…`);
+        const BRACKETED_PASTE_START = '\x1b[200~';
+        const BRACKETED_PASTE_END = '\x1b[201~';
+        try {
+          await invoke('pty_write', {
+            sessionId,
+            data: BRACKETED_PASTE_START + deliveryPrompt + BRACKETED_PASTE_END,
+          });
+          await delay(250);
+          await invoke('pty_write', { sessionId, data: '\r' });
+        } catch (err) {
+          finish(false, new Error(`Failed to deliver coordinator prompt: ${err}`));
+        }
+      };
+
+      const checkCompletion = () => {
+        if (settled || !promptDelivered) return;
+        const quietMs = Date.now() - lastOutputAt;
+        const sincePromptDelivery = Date.now() - promptDeliveredAt;
+        const hasDelimitedResult = extractDelimitedResult(sanitizedOutput, markerStart, markerEnd) !== null;
+
+        if (options.validateResult) {
+          const picked = pickValidatedResult(
+            sanitizedOutput,
+            options.validateResult,
+            markerStart,
+            markerEnd,
+          );
+          if (picked) {
+            if (!jsonShapeStableSince) jsonShapeStableSince = Date.now();
+            const stableMs = Date.now() - jsonShapeStableSince;
+            if (sincePromptDelivery >= 1000 && stableMs >= 600) {
+              reportProgress('Valid response received — finishing CLI session…');
+              finish(true);
+            }
+            return;
+          }
+          jsonShapeStableSince = 0;
+        }
+
+        if (hasDelimitedResult && quietMs >= 1200) {
+          if (!options.validateResult || options.validateResult(extractResult())) {
+            finish(true);
+            return;
+          }
+        }
+
+        if (expectJson && !options.validateResult) {
+          const shapeReady = satisfiesJsonShape(sanitizedOutput, jsonShape);
+          if (shapeReady) {
+            if (!jsonShapeStableSince) jsonShapeStableSince = Date.now();
+            const stableMs = Date.now() - jsonShapeStableSince;
+            const minWait = jsonShape === 'any' ? 1500 : 1000;
+            const stableRequired = jsonShape === 'any' ? 800 : 600;
+            if (sincePromptDelivery >= minWait && stableMs >= stableRequired) {
+            if (jsonShape !== 'any') {
+                reportProgress('Valid JSON received — finishing CLI session…');
+              }
+              finish(true);
+              return;
+            }
+          } else {
+            jsonShapeStableSince = 0;
+          }
+
+          if (jsonShape === 'any') {
+            const jsonText = extractLastJsonObjectText(sanitizedOutput);
+            const jsonReady =
+              (jsonText && isParseableJsonObject(jsonText)) || hasJsonFence(sanitizedOutput);
+            if (jsonReady && sincePromptDelivery >= 1500 && quietMs >= 800) {
+              finish(true);
+              return;
+            }
+          }
+        }
+
+        if (hasCompletionMarker(sanitizedOutput) && quietMs >= 1500) {
+          finish(true);
+          return;
+        }
+
+        const hasJsonCandidate = extractLastJsonObjectText(sanitizedOutput) !== null;
+        const jsonQuietMs = expectJson ? 2000 : 5000;
+        const jsonWaitMs = expectJson ? 3000 : 10_000;
+        if (hasJsonCandidate && sincePromptDelivery >= jsonWaitMs && quietMs >= jsonQuietMs) {
+          finish(true);
+        }
+      };
+
+      try {
+        outputUnlisten = await listen<unknown>('pty-output', (event) => {
+          const parsed = parsePtyOutputPayload(event.payload);
+          if (!parsed || parsed.sessionId !== sessionId || settled) return;
+
+          output = (output + parsed.data).slice(-MAX_TERMINAL_OUTPUT_CHARS);
+          sanitizedOutput = sanitizeTerminalOutput(output);
+          lastOutputAt = Date.now();
+
+          const accumulator = sanitizedOutput.slice(-READY_ACCUMULATOR_MAX_CHARS);
+          if (!cliLaunched && SHELL_READY_PATTERNS.some((p) => p.test(accumulator))) {
+            void tryLaunchCli('shell-ready');
+            return;
+          }
+
+          if (cliLaunched && !promptDelivered && Date.now() - cliLaunchedAt > 1500) {
+            const patterns = getCliReadyPatterns(this.workerCLI);
+            if (patterns.some((p) => p.test(accumulator))) {
+              void tryDeliverPrompt('cli-ready');
+            }
+          }
+
+          checkCompletion();
+        });
+
+        exitUnlisten = await listen<unknown>('pty-exit', (event) => {
+          const parsed = parsePtyExitPayload(event.payload);
+          if (!parsed || parsed.sessionId !== sessionId || settled) return;
+          const hasDelimited = extractDelimitedResult(sanitizedOutput, markerStart, markerEnd) !== null;
+          const hasJson = extractLastJsonObjectText(sanitizedOutput) !== null;
+          const hasMarker = hasCompletionMarker(sanitizedOutput);
+          if (hasDelimited || hasJson || hasMarker) {
+            finish(true);
+          } else if (sanitizedOutput.trim()) {
+            finish(false, new Error(`${label} CLI exited without a valid coordinator result.`));
+          } else {
+            finish(false, new Error(`Coordinator CLI exited before producing output.`));
+          }
+        });
+
+        options.signal?.addEventListener('abort', onAbort, { once: true });
+        if (options.signal?.aborted) {
+          onAbort();
+          return;
+        }
+
+        reportProgress('Opening terminal session…');
+        await invoke('pty_create', {
+          sessionId,
+          rows: 50,
+          cols: 220,
+          cwd: this.workspacePath,
+        });
+
+        launchTimer = setTimeout(() => { void tryLaunchCli('fallback-timer'); }, CLI_LAUNCH_FALLBACK_MS);
+        const promptDeliveryBaseMs = expectJson
+          ? 6_000
+          : CLI_LAUNCH_FALLBACK_MS + PROMPT_DELIVERY_FALLBACK_MS;
+        const schedulePromptFallback = (delayMs: number) => {
+          promptTimer = setTimeout(() => {
+            if (settled || promptDelivered) return;
+            if (!cliLaunched) {
+              schedulePromptFallback(2_000);
+              return;
+            }
+            const patterns = getCliReadyPatterns(this.workerCLI);
+            const accumulator = sanitizedOutput.slice(-READY_ACCUMULATOR_MAX_CHARS);
+            const cliReady = patterns.some((p) => p.test(accumulator));
+            const waitedLongEnough = Date.now() - cliLaunchedAt > (expectJson ? 12_000 : 30_000);
+            if (cliReady || waitedLongEnough) {
+              void tryDeliverPrompt('fallback-timer');
+            } else {
+              reportProgress(`Waiting for ${this.workerCLI} CLI to become ready…`);
+              schedulePromptFallback(2_000);
+            }
+          }, delayMs);
+        };
+        schedulePromptFallback(promptDeliveryBaseMs);
+        completionTimer = setInterval(checkCompletion, expectJson ? 400 : 1000);
+        timeoutTimer = setTimeout(() => {
+          finish(false, new Error(`${label} CLI timed out after ${Math.round(timeoutMs / 1000)}s.`));
+        }, timeoutMs);
+      } catch (err) {
+        finish(false, err instanceof Error ? err : new Error(String(err)));
+      }
+    });
+  }
+
+  // -----------------------------------------------------------------------
+  // Phase transitions — idempotent, safe for concurrent triggers
+  // -----------------------------------------------------------------------
+
+  /** spawning → launching_cli. Writes the CLI start command to the PTY. */
+  private async tryLaunchCli(agentId: string, reason: string): Promise<void> {
+    const rt = this.runtime.get(agentId);
+    const agent = this.agents.get(agentId);
+    if (!rt || !agent) return;
+    if (rt.phase !== 'spawning') return;
+    if (agent.status !== 'running') return;
+
+    rt.phase = 'launching_cli';
+    rt.cliLaunchedAt = Date.now();
+    rt.outputAccumulator = '';
+    agent.cliLaunched = true;
+
+    console.log(
+      `AgentManager[${agent.label || agent.role.name}]: launching CLI "${this.workerCLI}" (${reason})`,
+    );
+
+    try {
+      await invoke('pty_write', {
+        sessionId: agent.sessionId,
+        data: rt.launchCommand,
+      });
+    } catch (err) {
+      console.error(`AgentManager[${agentId}]: pty_write (CLI launch) failed:`, err);
+      agent.status = 'failed';
+      agent.failureReason = `Failed to launch CLI: ${err}`;
+      rt.phase = 'exiting';
+      if (rt.launchTimer) clearTimeout(rt.launchTimer);
+      if (rt.promptTimer) clearTimeout(rt.promptTimer);
+      this.eventEmitter.emitAgentEvent({
+        type: 'failed',
+        agentId,
+        error: agent.failureReason,
+      });
+      try {
+        await invoke('pty_kill', { sessionId: agent.sessionId });
+      } catch (killErr) {
+        console.error(`AgentManager[${agentId}]: pty_kill after launch failure:`, killErr);
+      }
+    }
+  }
+
+  /** Wait for CLI-ready patterns before delivering prompt (fallback timer path). */
+  private async tryDeliverPromptWhenReady(agentId: string, reason: string): Promise<void> {
+    const rt = this.runtime.get(agentId);
+    const agent = this.agents.get(agentId);
+    if (!rt || !agent || agent.status !== 'running') return;
+    if (rt.phase !== 'launching_cli') return;
+    if (!agent.cliLaunched) {
+      rt.promptTimer = setTimeout(() => {
+        rt.promptTimer = null;
+        void this.tryDeliverPromptWhenReady(agentId, reason);
+      }, 2_000);
+      return;
+    }
+    const patterns = getCliReadyPatterns(this.workerCLI);
+    const accumulator = sanitizeTerminalOutput(agent.terminalOutput).slice(-READY_ACCUMULATOR_MAX_CHARS);
+    const cliReady = patterns.some((p) => p.test(accumulator));
+    const waitedLongEnough = Date.now() - rt.cliLaunchedAt > 30_000;
+    if (!cliReady && !waitedLongEnough) {
+      rt.promptTimer = setTimeout(() => {
+        rt.promptTimer = null;
+        void this.tryDeliverPromptWhenReady(agentId, reason);
+      }, 2_000);
+      return;
+    }
+    await this.tryDeliverPrompt(agentId, reason);
+  }
+
+  /** launching_cli → working. Writes the short instruction prompt to the PTY. */
+  private async tryDeliverPrompt(agentId: string, reason: string): Promise<void> {
+    const rt = this.runtime.get(agentId);
+    const agent = this.agents.get(agentId);
+    if (!rt || !agent) return;
+    if (rt.phase !== 'launching_cli') return;
+    if (agent.status !== 'running') return;
+    if (!rt.pendingPrompt) return;
+
+    rt.phase = 'working';
+    rt.promptDeliveredAt = Date.now();
+    agent.promptDelivered = true;
+
+    console.log(
+      `AgentManager[${agent.label || agent.role.name}]: delivering prompt (${reason}, ${rt.pendingPrompt.length} chars)`,
+    );
+
+    // Deliver the prompt using bracketed paste sequences. Modern TUI CLIs
+    // (Claude Code, Gemini, Codex, …) recognize \e[200~ / \e[201~ as "this
+    // is a paste" so multi-line content doesn't get misinterpreted as a
+    // stream of Enter keypresses. The final CR after the close bracket is
+    // then processed as a real "submit" keystroke.
+    const BRACKETED_PASTE_START = '\x1b[200~';
+    const BRACKETED_PASTE_END = '\x1b[201~';
+
+    try {
+      await invoke('pty_write', {
+        sessionId: agent.sessionId,
+        data: BRACKETED_PASTE_START + rt.pendingPrompt + BRACKETED_PASTE_END,
+      });
+      // Short gap so the CLI processes the paste before seeing the Enter.
+      await delay(250);
+      await invoke('pty_write', {
+        sessionId: agent.sessionId,
+        data: '\r',
+      });
+    } catch (err) {
+      console.error(`AgentManager[${agentId}]: prompt delivery failed:`, err);
+      agent.failureReason = `Failed to deliver prompt: ${err}`;
+    }
+
+    rt.pendingPrompt = '';
+    this.startCompletionPolling(agentId);
+  }
+
+  // -----------------------------------------------------------------------
+  // Completion detection
+  // -----------------------------------------------------------------------
+
+  private startCompletionPolling(agentId: string): void {
+    const rt = this.runtime.get(agentId);
+    if (!rt || rt.completionTimer) return;
+
+    rt.completionTimer = setInterval(() => {
+      this.pollCompletion(agentId);
+    }, COMPLETION_POLL_INTERVAL_MS);
+  }
+
+  private stopCompletionPolling(agentId: string): void {
+    const rt = this.runtime.get(agentId);
+    if (!rt || !rt.completionTimer) return;
+    clearInterval(rt.completionTimer);
+    rt.completionTimer = null;
+  }
+
+  private pollCompletion(agentId: string): void {
+    const rt = this.runtime.get(agentId);
+    const agent = this.agents.get(agentId);
+    if (!rt || !agent || agent.status !== 'running') {
+      this.stopCompletionPolling(agentId);
+      return;
+    }
+
+    if (rt.phase !== 'working') return;
+
+    const sinceDelivery = Date.now() - rt.promptDeliveredAt;
+    if (sinceDelivery < COMPLETION_GRACE_MS) return;
+
+    const quietMs = Date.now() - agent.lastActivityAt.getTime();
+    const sanitizedTail = sanitizeTerminalOutput(
+      agent.terminalOutput.slice(-80_000),
+    );
+    const hasMarker = hasCompletionMarker(sanitizedTail);
+
+    if (hasMarker && quietMs >= COMPLETION_QUIET_AFTER_MARKER_MS) {
+      console.log(
+        `AgentManager[${agent.label || agent.role.name}]:`,
+        `completion marker + quiet ${quietMs}ms — sending /exit`,
+      );
+      this.stopCompletionPolling(agentId);
+      this.requestCliExit(agentId);
+      return;
+    }
+
+    // Heuristic fallback: if the agent has been completely silent for a long
+    // time AND has been working for at least 60s, assume it's sitting at a
+    // prompt and tell it to quit.
+    if (quietMs >= COMPLETION_IDLE_TIMEOUT_MS && sinceDelivery > 60_000) {
+      console.log(
+        `AgentManager[${agent.label || agent.role.name}]:`,
+        `idle ${quietMs}ms after ${sinceDelivery}ms of work — sending /exit`,
+      );
+      this.stopCompletionPolling(agentId);
+      this.requestCliExit(agentId);
+    }
+  }
+
+  /** Quit the CLI, then escalate to a shell exit, then a hard kill. */
+  private requestCliExit(agentId: string): void {
+    const rt = this.runtime.get(agentId);
+    const agent = this.agents.get(agentId);
+    if (!rt || !agent) return;
+    if (rt.exitRequested) return;
+
+    rt.exitRequested = true;
+    rt.phase = 'exiting';
+
+    const sessionId = agent.sessionId;
+    const sanitized = sanitizeTerminalOutput(agent.terminalOutput);
+    const alreadyAtShell = /Resume this session with:/i.test(sanitized);
+
+    if (alreadyAtShell) {
+      // Claude Code already quit on its own; just close the shell.
+      console.log(`AgentManager[${agentId}]: CLI already exited — closing shell`);
+      void invoke('pty_write', { sessionId, data: 'exit\r' }).catch(() => {});
+    } else {
+      // Send `/exit` (for Claude-style TUIs) and `exit` (for plain shells)
+      // as sequential writes. The CLI that's listening will handle the
+      // appropriate one; the other becomes a harmless echo.
+      void invoke('pty_write', { sessionId, data: '/exit\r' })
+        .catch((err) => console.warn(`AgentManager[${agentId}]: /exit write failed:`, err));
+      setTimeout(() => {
+        const latest = this.agents.get(agentId);
+        if (!latest || latest.status !== 'running') return;
+        void invoke('pty_write', { sessionId, data: 'exit\r' }).catch(() => {});
+      }, 4_000);
+    }
+
+    // Final escalation: if the PTY hasn't closed in time, force-kill it.
+    rt.exitKillTimer = setTimeout(() => {
+      const latest = this.agents.get(agentId);
+      const latestRt = this.runtime.get(agentId);
+      if (!latest || !latestRt) return;
+      if (latest.status !== 'running') return;
+
+      console.warn(
+        `AgentManager[${agentId}]: PTY still alive after /exit — forcing kill`,
+      );
+      latestRt.forcedKillAfterCompletion = true;
+      void invoke('pty_kill', { sessionId }).catch((err) =>
+        console.error(`AgentManager[${agentId}]: pty_kill failed:`, err),
+      );
+    }, EXIT_ESCALATION_MS);
+  }
+
+  // -----------------------------------------------------------------------
+  // PTY event handlers
+  // -----------------------------------------------------------------------
+
+  private handleAgentOutput(agentId: string, rawData: string): void {
+    const agent = this.agents.get(agentId);
+    const rt = this.runtime.get(agentId);
+    if (!agent || !rt) return;
+
+    agent.lastActivityAt = new Date();
+    agent.terminalOutput = (agent.terminalOutput + rawData).slice(-MAX_TERMINAL_OUTPUT_CHARS);
+
+    const sanitized = sanitizeTerminalOutput(rawData);
+
+    // Accumulate output for readiness pattern matching during launch.
+    if (rt.phase === 'spawning' || rt.phase === 'launching_cli') {
+      rt.outputAccumulator = (rt.outputAccumulator + sanitized).slice(-READY_ACCUMULATOR_MAX_CHARS);
+    }
+
+    // Add sanitized output to the line buffer.
+    const lines = sanitized.split('\n').map((line) => line.trimEnd());
+    agent.outputBuffer.push(...lines);
+    if (agent.outputBuffer.length > MAX_OUTPUT_BUFFER) {
+      agent.outputBuffer = agent.outputBuffer.slice(-MAX_OUTPUT_BUFFER);
+    }
+
+    // Output-driven early transitions.
+    if (rt.phase === 'spawning') {
+      if (SHELL_READY_PATTERNS.some((p) => p.test(rt.outputAccumulator))) {
+        console.log(
+          `AgentManager[${agent.label || agent.role.name}]: shell ready detected — launching CLI early`,
+        );
+        void this.tryLaunchCli(agentId, 'shell-ready');
+      }
+    } else if (rt.phase === 'launching_cli') {
+      const sinceLaunch = Date.now() - rt.cliLaunchedAt;
+      // Give the CLI at least 1.5s after launch so we don't misinterpret
+      // the CLI command echo itself as a "ready" prompt.
+      if (sinceLaunch > 1500) {
+        const patterns = getCliReadyPatterns(this.workerCLI);
+        if (patterns.some((p) => p.test(rt.outputAccumulator))) {
+          console.log(
+            `AgentManager[${agent.label || agent.role.name}]: CLI ready detected — delivering prompt early`,
+          );
+          void this.tryDeliverPrompt(agentId, 'cli-ready');
+        }
+      }
+    }
+
+    // Pattern-based automation hooks (confirm dialogs etc.)
+    if (this.patternDetector) {
+      const match = this.patternDetector(sanitized);
+      if (match) {
+        agent.metrics.promptsProcessed++;
+        this.eventEmitter.emitAgentEvent({ type: 'prompt_detected', agentId, match });
+      }
+    }
+
+    // Fan-out to subscribers.
+    this.eventEmitter.emitAgentEvent({ type: 'output', agentId, data: sanitized });
+    for (const cb of this.outputCallbacks) {
+      try { cb(agentId, sanitized); } catch (err) { console.error('AgentManager: output cb error:', err); }
+    }
+  }
+
+  private handleAgentExit(agentId: string, exitCode: number | null): void {
+    const agent = this.agents.get(agentId);
+    const rt = this.runtime.get(agentId);
+    if (!agent) return;
+    if (agent.status === 'terminated') return;
+
+    const aliveMs = Date.now() - agent.startedAt.getTime();
+    const phase = rt?.phase ?? 'unknown';
+    console.log(
+      `AgentManager[${agent.label || agent.role.name}]: pty-exit`,
+      `| exitCode=${exitCode} phase=${phase} aliveMs=${aliveMs}`,
+    );
+
+    // Clean up runtime state & prompt file.
+    if (rt) {
+      if (rt.completionTimer) clearInterval(rt.completionTimer);
+      if (rt.exitKillTimer) clearTimeout(rt.exitKillTimer);
+      if (rt.launchTimer) clearTimeout(rt.launchTimer);
+      if (rt.promptTimer) clearTimeout(rt.promptTimer);
+    }
+
+    if (agent.promptFilePath) {
+      remove(agent.promptFilePath).catch(() => {});
+    }
+
+    const rawCode = exitCode ?? 0;
+    const neverWorked = phase === 'spawning' || phase === 'launching_cli';
+    const forcedOK = rt?.forcedKillAfterCompletion && (phase === 'working' || phase === 'exiting');
+    const launchFailed = Boolean(agent.failureReason) && neverWorked;
+
+    let finalCode = rawCode;
+    if (launchFailed || (neverWorked && rawCode !== 0)) {
+      finalCode = rawCode !== 0 ? rawCode : 1;
+      if (!agent.failureReason) {
+        agent.failureReason =
+          phase === 'launching_cli'
+            ? `CLI failed to start (exit code ${rawCode})`
+            : `Shell exited before CLI launched (exit code ${rawCode})`;
+      }
+    }
+    if (forcedOK) finalCode = 0;
+
+    agent.status = finalCode === 0 && !launchFailed ? 'completed' : 'failed';
+
+    if (agent.status === 'failed') {
+      const aliveStr = aliveMs < 1000 ? `${aliveMs}ms` : `${(aliveMs / 1000).toFixed(1)}s`;
+      if (!agent.failureReason) {
+        if (phase === 'working' || phase === 'exiting') {
+          agent.failureReason = `CLI exited with code ${rawCode} after ${aliveStr}`;
+        } else if (phase === 'launching_cli') {
+          agent.failureReason = `CLI failed to start (exit code ${rawCode}, alive ${aliveStr})`;
+        } else {
+          agent.failureReason = `Shell exited before CLI launched (exit code ${rawCode}, alive ${aliveStr})`;
+        }
+      }
+    }
+
+    this.runtime.delete(agentId);
+    this.sessionToAgent.delete(agent.sessionId);
+
+    if (agent.status === 'completed') {
+      this.eventEmitter.emitAgentEvent({
+        type: 'completed',
+        agentId,
+        result: {
+          id: `result_${agentId}`,
+          agentId,
+          role: agent.role.type,
+          description: agent.assignedTask,
+          status: 'completed',
+          startedAt: agent.startedAt,
+          completedAt: new Date(),
+          output: this.getAgentHandoffOutput(agentId),
+          filesModified: agent.metrics.filesModified,
+        },
+      });
+    } else {
+      this.eventEmitter.emitAgentEvent({
+        type: 'failed',
+        agentId,
+        error: agent.failureReason || `Agent exited with code ${finalCode}`,
+      });
+    }
+
+    for (const cb of this.exitCallbacks) {
+      try { cb(agentId, finalCode); } catch (err) { console.error('AgentManager: exit cb error:', err); }
+    }
   }
 
   // -----------------------------------------------------------------------
@@ -880,19 +1502,15 @@ Restrictions: ${role.restrictions.join(', ')}
         parts.push('codex');
         if (config.provider === 'chatgpt' && config.model) parts.push('-m', config.model);
         break;
-      case 'velix':
-        parts.push('velix');
-        break;
-      case 'copilot':
-        parts.push('copilot');
-        break;
       default:
         if (cliOption) { parts.push(cliOption.command); }
         else { parts.push('claude', '--dangerously-skip-permissions'); }
         break;
     }
 
-    return 'set +e 2>/dev/null; ' + parts.join(' ') + '\r';
+    // `set +e` keeps the shell from exiting if the CLI returns non-zero.
+    // Trailing \r submits the command.
+    return `set +e 2>/dev/null; ${parts.join(' ')}\r`;
   }
 
   // -----------------------------------------------------------------------
@@ -917,31 +1535,38 @@ Restrictions: ${role.restrictions.join(', ')}
     const agent = this.agents.get(agentId);
     if (!agent) return;
 
+    console.log(`AgentManager[${agent.label || agent.role.name}]: terminate (${reason})`);
+
     agent.status = 'terminated';
     agent.failureReason = reason;
-    this.agentPhase.delete(agentId);
-    this.pendingPrompts.delete(agentId);
-    this.promptDeliveredAt.delete(agentId);
-    this.cancelCompletionTimer(agentId);
-    this.clearExitEscalation(agentId);
-    this.completionForcedKill.delete(agentId);
+
+    const rt = this.runtime.get(agentId);
+    if (rt) {
+      if (rt.completionTimer) clearInterval(rt.completionTimer);
+      if (rt.exitKillTimer) clearTimeout(rt.exitKillTimer);
+      if (rt.launchTimer) clearTimeout(rt.launchTimer);
+      if (rt.promptTimer) clearTimeout(rt.promptTimer);
+    }
 
     if (agent.promptFilePath) {
       remove(agent.promptFilePath).catch(() => {});
     }
 
     try {
+      // Send Ctrl-C first in case the CLI is prompting interactively.
       await invoke('pty_write', { sessionId: agent.sessionId, data: '\x03' });
-      await new Promise((r) => setTimeout(r, 500));
+      await delay(300);
       await invoke('pty_kill', { sessionId: agent.sessionId });
     } catch (err) {
-      console.error(`Failed to terminate agent ${agentId}:`, err);
+      console.error(`AgentManager[${agentId}]: terminate failed:`, err);
     }
 
-    this.eventEmitter.emitAgentEvent({ type: 'terminated', agentId, reason });
+    this.runtime.delete(agentId);
+    this.sessionToAgent.delete(agent.sessionId);
 
+    this.eventEmitter.emitAgentEvent({ type: 'terminated', agentId, reason });
     for (const cb of this.exitCallbacks) {
-      try { cb(agentId, null); } catch (err) { console.error('AgentManager: exit callback error:', err); }
+      try { cb(agentId, null); } catch (err) { console.error('AgentManager: exit cb error:', err); }
     }
 
     this.agents.delete(agentId);
@@ -950,6 +1575,14 @@ Restrictions: ${role.restrictions.join(', ')}
   async terminateAll(reason: string = 'Swarm stopped'): Promise<void> {
     const ids = Array.from(this.agents.keys());
     await Promise.all(ids.map((id) => this.terminateAgent(id, reason)));
+    for (const sessionId of [...this.coordinatorSessions]) {
+      this.coordinatorSessions.delete(sessionId);
+      try {
+        await invoke('pty_kill', { sessionId });
+      } catch (err) {
+        console.error(`AgentManager: coordinator session kill failed (${sessionId}):`, err);
+      }
+    }
   }
 
   // -----------------------------------------------------------------------
@@ -968,7 +1601,9 @@ Restrictions: ${role.restrictions.join(', ')}
     return Array.from(this.agents.values()).filter((a) => a.role.type === roleType);
   }
 
-  getAgentCount(): number { return this.agents.size; }
+  getAgentCount(): number {
+    return this.agents.size;
+  }
 
   getActiveAgentCount(): number {
     return Array.from(this.agents.values()).filter(
@@ -981,11 +1616,7 @@ Restrictions: ${role.restrictions.join(', ')}
     return agent ? [...agent.outputBuffer] : [];
   }
 
-  /**
-   * Full session text for coordinator handoff. Prefers sanitized PTY replay (up to
-   * MAX_TERMINAL_OUTPUT_CHARS); the rolling line buffer only keeps the last 500 lines
-   * and drops earlier scout/builder output in long sessions.
-   */
+  /** Full session text for coordinator handoff — prefers sanitized PTY replay. */
   getAgentHandoffOutput(agentId: string): string {
     const agent = this.agents.get(agentId);
     if (!agent) return '';
@@ -1059,4 +1690,12 @@ Restrictions: ${role.restrictions.join(', ')}
     else if (errorRate > 0.5) status = 'erroring';
     return { status, lastActivity: agent.lastActivityAt, errorRate };
   }
+}
+
+// ---------------------------------------------------------------------------
+// Helpers
+// ---------------------------------------------------------------------------
+
+function delay(ms: number): Promise<void> {
+  return new Promise((r) => setTimeout(r, ms));
 }

@@ -72,6 +72,35 @@ export class AIService {
         return this.storedKeys.has(p);
     }
 
+    /** Load a provider API key from disk if not already cached. */
+    async ensureApiKey(provider: ProviderID): Promise<string | null> {
+        const cached = this.storedKeys.get(provider);
+        if (cached) return cached;
+        try {
+            const apiKey = await invoke<string>('get_api_key', { provider });
+            if (apiKey) {
+                this.storedKeys.set(provider, apiKey);
+                return apiKey;
+            }
+        } catch {
+            // not configured
+        }
+        return null;
+    }
+
+    /** Preload keys for every provider used in a slot config. */
+    async ensureSlotKeys(slots: { provider: ProviderID }[]): Promise<ProviderID[]> {
+        const missing: ProviderID[] = [];
+        const seen = new Set<ProviderID>();
+        for (const slot of slots) {
+            if (seen.has(slot.provider)) continue;
+            seen.add(slot.provider);
+            const key = await this.ensureApiKey(slot.provider);
+            if (!key) missing.push(slot.provider);
+        }
+        return missing;
+    }
+
     /** Abort active generation — no-op in direct mode (no server to abort) */
     async abortCurrentResponse(): Promise<void> {}
 
@@ -342,6 +371,38 @@ Return ONLY a JSON object with this format:
             projectContext: options.projectContext,
         });
         return this.oneShotChat(CHAT_SYSTEM_PROMPT, prompt);
+    }
+
+    /**
+     * One-shot chat routed to an arbitrary provider/model slot.
+     * Does not mutate the active session or current provider selection.
+     */
+    async chatWithSlot(
+        system: string,
+        userContent: string,
+        slot: { provider: ProviderID; model: string },
+        options?: { maxTokens?: number; signal?: AbortSignal },
+    ): Promise<string> {
+        const apiKey = await this.ensureApiKey(slot.provider);
+        if (!apiKey) {
+            throw new Error(`No API key configured for provider "${slot.provider}". Add one in Settings.`);
+        }
+
+        const tempSessionID = await velixEngine.createSession();
+        try {
+            return await velixEngine.sendMessage({
+                sessionID: tempSessionID,
+                text: userContent,
+                system,
+                velixProviderID: slot.provider,
+                velixModelID: slot.model,
+                apiKey,
+                maxTokens: options?.maxTokens ?? 4096,
+                signal: options?.signal,
+            });
+        } finally {
+            await velixEngine.deleteSession(tempSessionID);
+        }
     }
 }
 

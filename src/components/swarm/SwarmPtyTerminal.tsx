@@ -3,6 +3,7 @@ import { Terminal } from '@xterm/xterm';
 import { FitAddon } from '@xterm/addon-fit';
 import { invoke } from '../../platform/native';
 import { Agent } from '../../services/swarm/types';
+import { tryAttachWebglRenderer } from '../../utils/xtermWebgl';
 import '@xterm/xterm/css/xterm.css';
 import './SwarmPtyTerminal.css';
 
@@ -97,7 +98,8 @@ export const SwarmPtyTerminal: React.FC<SwarmPtyTerminalProps> = ({
       fontSize: 12,
       fontFamily: "'JetBrains Mono', 'Fira Code', 'SF Mono', 'Menlo', 'Monaco', monospace",
       lineHeight: 1.05,
-      scrollback: 10000,
+      scrollback: 8000,
+      drawBoldTextInBrightColors: false,
       theme: theme === 'light' ? LIGHT_TERMINAL_THEME : DARK_TERMINAL_THEME,
     });
 
@@ -105,6 +107,8 @@ export const SwarmPtyTerminal: React.FC<SwarmPtyTerminalProps> = ({
     terminal.loadAddon(fitAddon);
     terminal.open(container);
     terminalRef.current = terminal;
+
+    tryAttachWebglRenderer(terminal);
 
     const isViewportNearBottom = () => {
       const viewport = container.querySelector('.xterm-viewport');

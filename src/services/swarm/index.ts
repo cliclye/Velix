@@ -24,6 +24,8 @@ export { SwarmEventEmitter, swarmEvents } from './SwarmEventEmitter';
 export { RoleSystem } from './RoleSystem';
 export { AGENT_ROLES, getRole, getRolesByPriority, getRoleName, getRoleColor } from './roleDefinitions';
 export { claudeCoordinator, SWARM_SPECIALIST_ROLE_ORDER } from './ClaudeCoordinator';
+export { runSwarmLaunch } from './swarmLaunchPipeline';
+export type { SwarmPlan, SwarmAssignment } from './swarmLaunchPipeline';
 
 // Automation
 export { AutomationRulesEngine } from './AutomationRulesEngine';

@@ -15,6 +15,7 @@ import {
 import { DiffPanel } from "./DiffPanel";
 import type { FileDiff, PendingFileChange } from "./DiffPanel";
 import { computeLineDiff } from "../utils/diff";
+import { tryAttachWebglRenderer } from "../utils/xtermWebgl";
 import "@xterm/xterm/css/xterm.css";
 import "./TerminalBlock.css";
 import { aiService } from "../services/ai/AIService";
@@ -590,7 +591,8 @@ export const TerminalBlock = forwardRef<TerminalRef, TerminalBlockProps>(({
       letterSpacing: 0,
       lineHeight: 1.01,
       allowProposedApi: true,
-      scrollback: 10000,
+      scrollback: 8000,
+      drawBoldTextInBrightColors: false,
       theme: theme === "light" ? LIGHT_TERMINAL_THEME : DARK_TERMINAL_THEME,
     });
 
@@ -603,7 +605,7 @@ export const TerminalBlock = forwardRef<TerminalRef, TerminalBlockProps>(({
     term.open(containerRef.current);
     termRef.current = term;
 
-    // Fit terminal to container
+    tryAttachWebglRenderer(term);
     setTimeout(() => {
       fitAddon.fit();
     }, 0);
@@ -705,7 +707,7 @@ export const TerminalBlock = forwardRef<TerminalRef, TerminalBlockProps>(({
     // and corrupting the display.
     //
     // Flow:
-    //   container size changes → debounced fit (100ms) → xterm reflows visually
+    //   container size changes → debounced fit (~48ms) → xterm reflows visually
     //   term.onResize fires → stores pending dims (does NOT call pty_resize)
     //   after 500ms of no further resizes → send pty_resize with final dims
     //                                     → scroll terminal to bottom
@@ -741,7 +743,7 @@ export const TerminalBlock = forwardRef<TerminalRef, TerminalBlockProps>(({
       fitTimer = setTimeout(() => {
         if (fitAddonRef.current) fitAddonRef.current.fit();
         fitTimer = null;
-      }, 100);
+      }, 48);
     };
 
     // Handle window resize

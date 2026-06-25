@@ -1,14 +1,17 @@
-import { invoke } from '../../platform/native';
-import { velixEngine } from '../ai/velix-engine';
-import { ProviderID, PROVIDERS } from '../ai/types';
 import { workspaceService } from '../workspace';
 import { getRole } from './roleDefinitions';
 import { Agent, AgentRoleType } from './types';
 
 export interface CoordinatorConfig {
-  provider: ProviderID;
-  model: string;
-  apiKey: string;
+  cliLabel: string;
+  runPrompt: (
+    prompt: string,
+    options?: {
+      label?: string;
+      timeoutMs?: number;
+      signal?: AbortSignal;
+    },
+  ) => Promise<string>;
 }
 
 export const SWARM_SPECIALIST_ROLE_ORDER: AgentRoleType[] = [
@@ -106,6 +109,37 @@ export interface CoordinatorSyncResult {
   nextMilestone: string;
   actions: CoordinatorAction[];
 }
+
+const buildIdleSyncResult = (): CoordinatorSyncResult => ({
+  summary: 'Coordinator sync skipped; no CLI guidance was produced.',
+  overallStatus: 'on_track',
+  nextMilestone: 'Keep builders moving inside their lanes and send completed work through review.',
+  actions: [],
+});
+
+const evaluateReviewLocally = (
+  reviewerOutputs: Map<string, string>,
+): { verdict: 'APPROVED' | 'REVISE'; summary: string; revisionInstructions: string } => {
+  const combined = Array.from(reviewerOutputs.values()).join('\n\n');
+  const hasReviseSignal = /\b(REVISE|REQUEST CHANGES|CHANGES REQUESTED|FAILED|BLOCKER|CRITICAL)\b/i.test(combined);
+  const hasApprovedSignal = /\b(APPROVED|LGTM|GO\/NO-GO:\s*GO|GO\s+VERDICT)\b/i.test(combined);
+
+  if (hasApprovedSignal && !hasReviseSignal) {
+    return {
+      verdict: 'APPROVED',
+      summary: 'Reviewer output indicates approval.',
+      revisionInstructions: '',
+    };
+  }
+
+  return {
+    verdict: 'REVISE',
+    summary: hasReviseSignal
+      ? 'Reviewer output indicates revisions are needed.'
+      : 'Reviewer output did not contain a clear approval signal.',
+    revisionInstructions: combined.slice(-4000) || 'Reviewers did not produce actionable output. Re-verify the work and report a clear verdict.',
+  };
+};
 
 const stripJsonEnvelope = (raw: string): string => {
   const trimmed = raw.trim();
@@ -429,47 +463,19 @@ const resolveActionAssignmentId = (
 };
 
 export class ClaudeCoordinator {
-  async hasClaudeKey(): Promise<boolean> {
-    return this.hasCoordinatorKey('claude');
-  }
-
-  async hasCoordinatorKey(provider: ProviderID): Promise<boolean> {
-    try {
-      const key = await invoke<string>('get_api_key', { provider });
-      return Boolean(key);
-    } catch {
-      return false;
-    }
-  }
-
-  /** Fetch the stored API key for a provider. Returns empty string if not found. */
-  async getCoordinatorApiKey(provider: ProviderID): Promise<string> {
-    try {
-      const key = await invoke<string>('get_api_key', { provider });
-      return key || '';
-    } catch {
-      return '';
-    }
-  }
-
-  private async callCoordinator(prompt: string, config: CoordinatorConfig): Promise<string> {
-    const sessionID = await velixEngine.createSession();
-    try {
-      return await velixEngine.sendMessage({
-        sessionID,
-        text: prompt,
-        velixProviderID: config.provider,
-        velixModelID: config.model,
-        apiKey: config.apiKey,
-        maxTokens: 2048,
-      });
-    } finally {
-      await velixEngine.deleteSession(sessionID);
-    }
+  private async callCoordinator(
+    prompt: string,
+    config: CoordinatorConfig,
+    options?: { label?: string; timeoutMs?: number },
+  ): Promise<string> {
+    return config.runPrompt(prompt, {
+      label: options?.label || `Coordinator (${config.cliLabel})`,
+      timeoutMs: options?.timeoutMs,
+    });
   }
 
   /**
-   * Scout external research via API — gathers best practices, comparisons,
+   * Scout research via the selected coordinator CLI — gathers best practices, comparisons,
    * and recommendations before the CLI agent does internal code analysis.
    */
   async scoutResearch(
@@ -501,7 +507,10 @@ export class ClaudeCoordinator {
       'Format your output as clean markdown sections.',
     ].join('\n');
 
-    return this.callCoordinator(prompt, config);
+    return this.callCoordinator(prompt, config, {
+      label: `Scout research (${config.cliLabel})`,
+      timeoutMs: maxMode ? 240_000 : 180_000,
+    });
   }
 
   async createLaunchPlan(goal: string, workspacePath: string, roles: AgentRoleType[], config?: CoordinatorConfig, maxMode?: boolean): Promise<CoordinatorPlan> {
@@ -558,15 +567,21 @@ export class ClaudeCoordinator {
       maxMode ? `\n## MAX MODE ACTIVE\nThe swarm is in MAX MODE. Write extremely detailed, thorough task prompts for each agent. Each builder task must be 5-8 sentences with specific implementation details, edge cases to handle, and quality requirements. Scout tasks must cover every relevant area exhaustively. Reviewer tasks must demand production-level quality with zero tolerance for shortcuts.` : '',
     ].filter(Boolean).join('\n');
 
-    const resolvedConfig = config ?? {
-      provider: 'claude' as ProviderID,
-      model: PROVIDERS.find((p) => p.id === 'claude')?.models[0] ?? 'claude-sonnet-4-6',
-      apiKey: await this.getCoordinatorApiKey('claude'),
-    };
+    if (!config) {
+      return normalizePlan(goal, roles, null);
+    }
 
-    const raw = await this.callCoordinator(prompt, resolvedConfig);
-
-    return normalizePlan(goal, roles, parseObjectResponse<CoordinatorPlan>(raw));
+    try {
+      const raw = await this.callCoordinator(prompt, config, {
+        label: `Coordinator planning (${config.cliLabel})`,
+        timeoutMs: maxMode ? 300_000 : 240_000,
+      });
+      return normalizePlan(goal, roles, parseObjectResponse<CoordinatorPlan>(raw));
+    } catch (err) {
+      if (err instanceof DOMException && err.name === 'AbortError') throw err;
+      console.warn('Coordinator launch plan failed; using fallback plan:', err);
+      return normalizePlan(goal, roles, null);
+    }
   }
 
   async createSyncResult(
@@ -617,13 +632,21 @@ export class ClaudeCoordinator {
       'Actions optional. Only send when redirection/handoff is needed. Keep messages actionable (2-3 sentences max).',
     ].join('\n');
 
-    const resolvedConfig = config ?? {
-      provider: 'claude' as ProviderID,
-      model: PROVIDERS.find((p) => p.id === 'claude')?.models[0] ?? 'claude-sonnet-4-6',
-      apiKey: await this.getCoordinatorApiKey('claude'),
-    };
+    if (!config) {
+      return buildIdleSyncResult();
+    }
 
-    const raw = await this.callCoordinator(prompt, resolvedConfig);
+    let raw = '';
+    try {
+      raw = await this.callCoordinator(prompt, config, {
+        label: `Coordinator sync (${config.cliLabel})`,
+        timeoutMs: 180_000,
+      });
+    } catch (err) {
+      if (err instanceof DOMException && err.name === 'AbortError') throw err;
+      console.warn('Coordinator sync failed; continuing without actions:', err);
+      return buildIdleSyncResult();
+    }
 
     const parsed = parseObjectResponse<Partial<CoordinatorSyncResult> & { actions?: RawCoordinatorAction[] }>(raw);
     const actions = Array.isArray(parsed?.actions)
@@ -758,13 +781,22 @@ export class ClaudeCoordinator {
       'revisionInstructions: If REVISE, compile all reviewer feedback into clear, actionable instructions for builders. If APPROVED, leave empty.',
     ].join('\n');
 
-    const resolvedConfig = config ?? {
-      provider: 'claude' as ProviderID,
-      model: PROVIDERS.find((p) => p.id === 'claude')?.models[0] ?? 'claude-sonnet-4-6',
-      apiKey: await this.getCoordinatorApiKey('claude'),
-    };
+    if (!config) {
+      return evaluateReviewLocally(reviewerOutputs);
+    }
 
-    const raw = await this.callCoordinator(prompt, resolvedConfig);
+    let raw = '';
+    try {
+      raw = await this.callCoordinator(prompt, config, {
+        label: `Coordinator review (${config.cliLabel})`,
+        timeoutMs: 180_000,
+      });
+    } catch (err) {
+      if (err instanceof DOMException && err.name === 'AbortError') throw err;
+      console.warn('Coordinator review evaluation failed; using local verdict parser:', err);
+      return evaluateReviewLocally(reviewerOutputs);
+    }
+
     const parsed = parseObjectResponse<{ verdict?: string; summary?: string; revisionInstructions?: string }>(raw);
 
     const verdict = parsed?.verdict?.toUpperCase() === 'APPROVED' ? 'APPROVED' : 'REVISE';

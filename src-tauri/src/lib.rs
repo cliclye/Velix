@@ -1,4 +1,4 @@
-use portable_pty::{native_pty_system, CommandBuilder, PtyPair, PtySize};
+use portable_pty::{native_pty_system, ChildKiller, CommandBuilder, PtyPair, PtySize};
 use serde::Serialize;
 use std::collections::HashMap;
 use std::fs;
@@ -110,6 +110,7 @@ struct AppSettings {
 struct PtySession {
     pair: PtyPair,
     writer: Box<dyn IoWrite + Send>,
+    child_killer: Box<dyn ChildKiller + Send + Sync>,
 }
 
 // Simple in-memory storage for API keys and shell state
@@ -304,9 +305,6 @@ fn pty_create(
             cmd.env("GEMINI_API_KEY", gemini_key);
             cmd.env("GOOGLE_API_KEY", gemini_key);
         }
-        if let Some(deepseek_key) = settings.api_keys.get("deepseek") {
-            cmd.env("DEEPSEEK_API_KEY", deepseek_key);
-        }
     }
 
     // Spawn the shell in the PTY
@@ -327,8 +325,14 @@ fn pty_create(
         .take_writer()
         .map_err(|e| format!("Failed to take writer: {}", e))?;
 
+    let child_killer = child.clone_killer();
+
     // Store the session
-    let session = Arc::new(Mutex::new(PtySession { pair, writer }));
+    let session = Arc::new(Mutex::new(PtySession {
+        pair,
+        writer,
+        child_killer,
+    }));
 
     {
         let mut sessions = state.pty_sessions.lock().map_err(|e| e.to_string())?;
@@ -432,13 +436,17 @@ fn pty_resize(
 
 #[tauri::command]
 fn pty_kill(session_id: String, state: State<'_, AppState>) -> Result<(), String> {
-    let mut sessions = state.pty_sessions.lock().map_err(|e| e.to_string())?;
+    let session = {
+        let mut sessions = state.pty_sessions.lock().map_err(|e| e.to_string())?;
+        sessions.remove(&session_id)
+    };
 
-    if sessions.remove(&session_id).is_some() {
-        Ok(())
-    } else {
-        Err(format!("PTY session not found: {}", session_id))
-    }
+    let session = session.ok_or_else(|| format!("PTY session not found: {}", session_id))?;
+    let mut session_guard = session.lock().map_err(|e| e.to_string())?;
+    session_guard
+        .child_killer
+        .kill()
+        .map_err(|e| format!("Failed to kill PTY session {}: {}", session_id, e))
 }
 
 // ==================== Legacy Shell Commands (for compatibility) ====================
@@ -1724,6 +1732,16 @@ struct AiChatMessage {
     content: String,
 }
 
+/// Newer OpenAI chat models (GPT-5+, o-series, GPT-4.1+) reject `max_tokens`.
+fn openai_uses_max_completion_tokens(model: &str) -> bool {
+    let m = model.to_ascii_lowercase();
+    m.starts_with("gpt-5")
+        || m.starts_with("gpt-4.1")
+        || m.starts_with("o1")
+        || m.starts_with("o3")
+        || m.starts_with("o4")
+}
+
 /// Provider-agnostic AI chat command. Mirrors the Electron `aiChat` handler.
 #[tauri::command]
 async fn ai_chat(
@@ -1817,12 +1835,6 @@ async fn ai_chat(
     // OpenAI-compatible providers
     let base_url = match provider.as_str() {
         "chatgpt" => "https://api.openai.com/v1",
-        "deepseek" => "https://api.deepseek.com/v1",
-        "groq" => "https://api.groq.com/openai/v1",
-        "mistral" => "https://api.mistral.ai/v1",
-        "minimax" => "https://api.minimax.chat/v1",
-        "kimi" => "https://api.moonshot.cn/v1",
-        "glm4" => "https://open.bigmodel.cn/api/paas/v4",
         _ => return Err(format!("Unsupported AI provider: {}", provider)),
     };
 
@@ -1833,11 +1845,19 @@ async fn ai_chat(
     for m in &messages {
         chat_msgs.push(serde_json::json!({"role": m.role, "content": m.content}));
     }
-    let body = serde_json::json!({
-        "model": model,
-        "messages": chat_msgs,
-        "max_tokens": max,
-    });
+    let body = if openai_uses_max_completion_tokens(&model) {
+        serde_json::json!({
+            "model": model,
+            "messages": chat_msgs,
+            "max_completion_tokens": max,
+        })
+    } else {
+        serde_json::json!({
+            "model": model,
+            "messages": chat_msgs,
+            "max_tokens": max,
+        })
+    };
     let response = client
         .post(format!("{}/chat/completions", base_url))
         .header("Authorization", format!("Bearer {}", api_key))

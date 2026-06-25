@@ -1750,6 +1750,40 @@ html, body, #root {
   letter-spacing: 0.3px;
 }
 
+.status-cmd-palette-btn {
+  background: rgba(255, 255, 255, 0.08);
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  border-radius: 6px;
+  cursor: pointer;
+  font-size: 10px;
+  font-family: var(--font-mono);
+  font-weight: 600;
+  padding: 0 8px;
+  color: rgba(255, 255, 255, 0.88);
+  transition: background 0.15s ease, border-color 0.15s ease;
+  height: 24px;
+  display: flex;
+  align-items: center;
+}
+
+.status-cmd-palette-btn:hover {
+  background: rgba(255, 255, 255, 0.16);
+  border-color: rgba(255, 255, 255, 0.22);
+  color: white;
+  transform: none;
+}
+
+.app.light .status-cmd-palette-btn {
+  background: rgba(0, 0, 0, 0.05);
+  border-color: rgba(0, 0, 0, 0.1);
+  color: var(--text-secondary);
+}
+
+.app.light .status-cmd-palette-btn:hover {
+  background: rgba(0, 0, 0, 0.08);
+  color: var(--text-primary);
+}
+
 .status-theme-btn {
   background: none;
   border: none;
@@ -1835,15 +1869,20 @@ html, body, #root {
   flex-direction: column;
   overflow: hidden;
   height: 100%;
+  padding: 10px 12px 12px;
+  background: var(--bg-primary);
 }
 
 .terminal-topbar {
   display: flex;
   flex-direction: column;
   background: var(--bg-secondary);
-  border-bottom: 1px solid var(--border-default);
+  border: 1px solid var(--border-default);
+  border-bottom: none;
+  border-radius: 10px 10px 0 0;
   flex-shrink: 0;
   overflow: hidden;
+  box-shadow: 0 1px 0 color-mix(in srgb, var(--text-primary) 4%, transparent);
 }
 
 .terminal-tab-row {
@@ -1860,6 +1899,21 @@ html, body, #root {
   gap: 12px;
   min-width: 0;
   flex: 1 1 auto;
+}
+
+.workspace-heading {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  flex-shrink: 0;
+}
+
+.workspace-tagline {
+  font-size: 10px;
+  font-weight: 500;
+  letter-spacing: 0.03em;
+  color: var(--text-hint);
+  line-height: 1.2;
 }
 
 .workspace-strip {
@@ -1976,7 +2030,7 @@ html, body, #root {
     display: none;
   }
 
-  .workspace-label,
+  .workspace-heading,
   .workspace-branch-chip {
     display: none;
   }
@@ -2025,7 +2079,9 @@ html, body, #root {
   flex: 1 1 auto;
   overflow: hidden;
   background: var(--bg-terminal);
-  border-radius: 0;
+  border-radius: 0 0 10px 10px;
+  border: 1px solid var(--border-default);
+  border-top: 1px solid var(--border-light);
   display: flex;
   gap: 0;
   width: 100%;
@@ -2034,6 +2090,11 @@ html, body, #root {
   margin: 0;
   padding: 0;
   position: relative;
+  box-shadow: 0 12px 40px rgba(0, 0, 0, 0.12);
+}
+
+.app.dark .terminal-body {
+  box-shadow: 0 16px 48px rgba(0, 0, 0, 0.35);
 }
 
 /* Hidden (inactive) tab panels are position:absolute so they retain
@@ -2063,6 +2124,42 @@ html, body, #root {
   align-content: stretch;
   grid-auto-flow: row;
   grid-auto-rows: minmax(0, 1fr);
+}
+
+/* Two-pane flex layout (draggable gutter) — overrides grid from .split-view */
+.terminal-tab-panel.split-view.split-pair {
+  display: flex;
+  gap: 0;
+  align-items: stretch;
+}
+
+.terminal-pair-splitter {
+  flex: 0 0 5px;
+  align-self: stretch;
+  cursor: col-resize;
+  background: transparent;
+  border-radius: 4px;
+  flex-shrink: 0;
+  transition: background 0.12s ease;
+}
+
+.terminal-pair-splitter:hover {
+  background: color-mix(in srgb, var(--accent-primary) 38%, transparent);
+}
+
+.split-pair-vertical .terminal-pair-splitter {
+  cursor: row-resize;
+}
+
+.app.pair-split-resizing,
+.terminal-tab-panel.pair-resizing {
+  cursor: col-resize;
+  user-select: none;
+}
+
+.app.pair-split-resizing .split-pair-vertical,
+.terminal-tab-panel.pair-resizing.split-pair-vertical {
+  cursor: row-resize;
 }
 
 .terminal-body .terminal-container {
