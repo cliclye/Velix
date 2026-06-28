@@ -834,11 +834,19 @@ export const SwarmPanel: React.FC<SwarmPanelProps> = ({
 
           const collectAgent = (agentId: string) => {
             const agent = manager.getAgent(agentId);
-            if (agent) {
-              const assignment = plan.assignments.find((a) => a.id === agent.assignmentId);
-              if (assignment) {
-                outputs.set(assignment.label, manager.getAgentHandoffOutput(agentId));
-              }
+            if (!agent) return;
+
+            const assignment = plan.assignments.find(
+              (a) => a.id === agent.assignmentId || a.label === agent.label,
+            );
+            const label = assignment?.label || agent.label || agent.role.name;
+            if (!label) return;
+
+            const handoff = manager.getAgentHandoffOutput(agentId);
+            if (handoff.trim()) {
+              outputs.set(label, handoff);
+            } else {
+              appendLog('error', `Agent ${label} finished with no readable CLI output for coordinator handoff.`);
             }
           };
 

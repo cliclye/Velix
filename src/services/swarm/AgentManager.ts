@@ -26,6 +26,7 @@ import {
 } from './types';
 import { SwarmEventEmitter } from './SwarmEventEmitter';
 import { aiService } from '../ai/AIService';
+import { formatCoordinatorHandoff, getRawAgentOutput, sanitizeTerminalOutput } from './handoffOutput';
 
 // ---------------------------------------------------------------------------
 // Payload parsing — Tauri emits snake_case; tolerate camelCase if serialization changes
@@ -161,18 +162,7 @@ export function getCliReadyPatterns(workerCLI: WorkerCLI): RegExp[] {
   ]);
 }
 
-// ---------------------------------------------------------------------------
-// ANSI sanitizer
-// ---------------------------------------------------------------------------
-
-const ANSI_ESCAPE_REGEX = /\u001B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])|\u009B[0-?]*[ -/]*[@-~]/g;
-
-const sanitizeTerminalOutput = (data: string): string =>
-  data
-    .replace(/\r\n/g, '\n')
-    .replace(/\r/g, '\n')
-    .replace(ANSI_ESCAPE_REGEX, '')
-    .replace(/[\u0000-\u0008\u000B-\u001A\u001C-\u001F\u007F]/g, '');
+// ANSI sanitizer — shared with handoffOutput for coordinator extraction
 
 // ---------------------------------------------------------------------------
 // Worker CLI configuration (options, detection, persistence)
@@ -725,7 +715,22 @@ export class AgentManager {
   // PTY exit handler
   // -----------------------------------------------------------------------
 
+  private async drainAgentOutput(agentId: string): Promise<void> {
+    const pending = this.outputProcessing.get(agentId);
+    if (pending) {
+      await pending;
+    }
+  }
+
   private handleAgentExit(agentId: string, exitCode: number | null): void {
+    void this.finalizeAgentExit(agentId, exitCode).catch((err) => {
+      console.error(`AgentManager: finalize exit failed for ${agentId}:`, err);
+    });
+  }
+
+  private async finalizeAgentExit(agentId: string, exitCode: number | null): Promise<void> {
+    await this.drainAgentOutput(agentId);
+
     const agent = this.agents.get(agentId);
     if (!agent) return;
     if (agent.status === 'terminated') return;
@@ -1046,9 +1051,7 @@ Restrictions: ${role.restrictions.join(', ')}
   getAgentHandoffOutput(agentId: string): string {
     const agent = this.agents.get(agentId);
     if (!agent) return '';
-    const fromTerm = sanitizeTerminalOutput(agent.terminalOutput).trim();
-    if (fromTerm.length > 0) return fromTerm;
-    return agent.outputBuffer.join('\n');
+    return formatCoordinatorHandoff(getRawAgentOutput(agent), agent.role.type);
   }
 
   // -----------------------------------------------------------------------

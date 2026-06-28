@@ -4,6 +4,7 @@ import { ProviderID, PROVIDERS } from '../ai/types';
 import { workspaceService } from '../workspace';
 import { getRole } from './roleDefinitions';
 import { Agent, AgentRoleType } from './types';
+import { getAgentSyncHandoffText } from './handoffOutput';
 
 export interface CoordinatorConfig {
   provider: ProviderID;
@@ -586,6 +587,7 @@ export class ClaudeCoordinator {
     // Compact snapshot for the prompt — what the coordinator needs to assess state.
     const promptSnapshot = agents.map((agent) => {
       const assignment = plan.assignments.find((a) => a.id === agent.assignmentId);
+      const handoff = getAgentSyncHandoffText(agent);
       return {
         id: agent.assignmentId || sanitizeId(agent.label || agent.role.name || agent.id),
         label: agent.label || agent.role.name,
@@ -593,8 +595,8 @@ export class ClaudeCoordinator {
         status: agent.status,
         task: assignment?.task || agent.assignedTask || '',
         ownedFiles: assignment?.ownedFiles || [],
-        // Last 15 lines, max 1200 chars — enough to understand progress and detect issues
-        tail: agent.outputBuffer.slice(-15).join('\n').slice(-1200),
+        output: handoff,
+        hasStructuredHandoff: handoff.includes('---END-'),
       };
     });
 

@@ -24,6 +24,14 @@ export { SwarmEventEmitter, swarmEvents } from './SwarmEventEmitter';
 export { RoleSystem } from './RoleSystem';
 export { AGENT_ROLES, getRole, getRolesByPriority, getRoleName, getRoleColor } from './roleDefinitions';
 export { claudeCoordinator, SWARM_SPECIALIST_ROLE_ORDER } from './ClaudeCoordinator';
+export {
+  extractStructuredHandoff,
+  formatCoordinatorHandoff,
+  getAgentHandoffText,
+  getAgentSyncHandoffText,
+  getRawAgentOutput,
+  verifyHandoffExtraction,
+} from './handoffOutput';
 
 // Automation
 export { AutomationRulesEngine } from './AutomationRulesEngine';

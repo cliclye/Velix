@@ -4,6 +4,7 @@ import { ProviderID, PROVIDERS } from '../ai/types';
 import { workspaceService } from '../workspace';
 import { getRole } from './roleDefinitions';
 import { Agent, AgentRoleType } from './types';
+import { getAgentSyncHandoffText } from './handoffOutput';
 
 export interface CoordinatorConfig {
   provider: ProviderID;
@@ -494,14 +495,17 @@ export class SwarmCoordinator {
     }));
 
     // Compact snapshot for the prompt — only what the coordinator needs to assess state.
-    const promptSnapshot = agents.map((agent) => ({
-      id: agent.assignmentId || sanitizeId(agent.label || agent.role.name || agent.id),
-      label: agent.label || agent.role.name,
-      role: agent.role.type,
-      status: agent.status,
-      // Last 8 lines, max 600 chars — enough to detect stalls or completion
-      tail: agent.outputBuffer.slice(-8).join('\n').slice(-600),
-    }));
+    const promptSnapshot = agents.map((agent) => {
+      const handoff = getAgentSyncHandoffText(agent);
+      return {
+        id: agent.assignmentId || sanitizeId(agent.label || agent.role.name || agent.id),
+        label: agent.label || agent.role.name,
+        role: agent.role.type,
+        status: agent.status,
+        output: handoff,
+        hasStructuredHandoff: handoff.includes('---END-'),
+      };
+    });
 
     // Strip bulky fields from plan; only send assignment IDs, labels, roles
     const planSummary = {
