@@ -1313,6 +1313,9 @@ fn get_git_diff(repo_path: &str, file_path: &str, staged: bool) -> Result<String
     if staged {
         args.push("--cached");
     }
+    // Pathspec separator: paths from git status can begin with `-` (e.g. `--output=...`),
+    // which git would otherwise parse as options.
+    args.push("--");
     args.push(file_path);
 
     let output = Command::new("git")
