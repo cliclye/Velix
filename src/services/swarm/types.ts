@@ -99,6 +99,8 @@ export interface Agent {
   lastActivityAt: Date;
   outputBuffer: string[]; // Rolling buffer of last N lines
   terminalOutput: string; // Raw PTY stream used for terminal replay
+  /** Bumps when terminalOutput is truncated so UIs can reset replay without prefix guessing. */
+  terminalOutputEpoch?: number;
   metrics: AgentMetrics;
   promptFilePath?: string; // Temp file containing the full prompt for this agent
   failureReason?: string; // Human-readable explanation when status is 'failed'

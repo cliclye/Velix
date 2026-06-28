@@ -2,13 +2,14 @@ import React, { useState, useEffect, useRef, useCallback, useMemo } from 'react'
 import {
   AgentManager,
   SwarmEventEmitter,
+  AutomationRulesEngine,
   getRole,
   claudeCoordinator,
   getWorkerCLIOptions,
   detectWorkerCLIAvailability,
 } from '../../services/swarm';
 import { CoordinatorConfig } from '../../services/swarm/ClaudeCoordinator';
-import { Agent, AgentRoleType, AgentStatus, WorkerCLI } from '../../services/swarm/types';
+import { Agent, AgentRoleType, AgentStatus, PatternMatch, WorkerCLI } from '../../services/swarm/types';
 import { PROVIDERS, ProviderID } from '../../services/ai/types';
 import { AgentTerminal } from './AgentTerminal';
 import { SwarmPtyTerminal } from './SwarmPtyTerminal';
@@ -326,6 +327,7 @@ export const SwarmPanel: React.FC<SwarmPanelProps> = ({
   workspacePath,
 }) => {
   const managerRef = useRef<AgentManager | null>(null);
+  const automationRulesRef = useRef<AutomationRulesEngine | null>(null);
   const syncIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
   /** Prevents overlapping coordinator syncs when the 45s interval fires with a stale `isSyncing` closure. */
   const coordinatorSyncInFlightRef = useRef(false);
@@ -447,12 +449,43 @@ export const SwarmPanel: React.FC<SwarmPanelProps> = ({
       return;
     }
 
-    const manager = new AgentManager(new SwarmEventEmitter(), workspacePath);
+    const emitter = new SwarmEventEmitter();
+    const rules = new AutomationRulesEngine();
+    automationRulesRef.current = rules;
+    const manager = new AgentManager(emitter, workspacePath);
+    manager.setPatternDetector((output) => rules.detectPrompt(output));
     manager.setWorkerCLI(workerCLI);
     managerRef.current = manager;
 
+    const handlePromptDetected = async (agentId: string, match: PatternMatch) => {
+      const agent = manager.getAgent(agentId);
+      if (!agent || agent.status === 'terminated' || agent.status === 'waiting_for_approval') return;
+
+      const decision = rules.analyzeContext(match, agent);
+      if (!decision.requiresUserApproval) {
+        await rules.executeAction(decision, agentId, manager);
+        if (decision.action === 'approve') {
+          manager.updateAgentMetrics(agentId, {
+            autoApprovals: (agent.metrics.autoApprovals || 0) + 1,
+          });
+        }
+      } else {
+        manager.updateAgentStatus(agentId, 'waiting_for_approval');
+        manager.updateAgentMetrics(agentId, {
+          escalations: (agent.metrics.escalations || 0) + 1,
+        });
+      }
+    };
+
     let disposed = false;
     setSwarmPtyReady(false);
+
+    const unsubscribeAutomation = emitter.subscribeToAgentEvents((event) => {
+      if (disposed || event.type !== 'prompt_detected') return;
+      void handlePromptDetected(event.agentId, event.match).catch((err) => {
+        console.error('SwarmPanel: prompt automation error:', err);
+      });
+    });
 
     manager.initialize()
       .then(() => {
@@ -490,16 +523,26 @@ export const SwarmPanel: React.FC<SwarmPanelProps> = ({
       disposed = true;
       setSwarmPtyReady(false);
       stopAutoSync();
-      void manager
-        .terminateAll('Swarm panel closed')
-        .catch(() => {})
-        .finally(() => {
-          void manager.cleanup();
-        });
       unsubscribeOutput();
       unsubscribeExit();
       unsubscribeSpawn();
-      managerRef.current = null;
+      unsubscribeAutomation();
+      void (async () => {
+        try {
+          await manager.terminateAll('Swarm panel closed');
+        } catch {
+          // Best-effort teardown.
+        }
+        try {
+          await manager.cleanup();
+        } catch {
+          // Best-effort teardown.
+        }
+        automationRulesRef.current = null;
+        if (managerRef.current === manager) {
+          managerRef.current = null;
+        }
+      })();
     };
   }, [isOpen, refreshAgents, stopAutoSync, workspacePath]);
 
@@ -839,6 +882,12 @@ export const SwarmPanel: React.FC<SwarmPanelProps> = ({
           if (!resolved && pending.size === 0) finish();
         });
 
+      const dismissWaveAgents = async (agentIds: string[], reason: string) => {
+        if (agentIds.length === 0) return;
+        await Promise.all(agentIds.map((id) => manager.terminateAgent(id, reason).catch(() => {})));
+        refreshAgents();
+      };
+
       // Helper: spawn a wave of assignments, return their agent IDs.
       // When passAllContext is true, all depOutputs are injected regardless of the assignment's dependency list.
       const spawnWave = async (
@@ -939,6 +988,7 @@ export const SwarmPanel: React.FC<SwarmPanelProps> = ({
         );
         const scoutOutputs = await waitForAgents(scoutIds);
         if (bailIfAborted()) return;
+        await dismissWaveAgents(scoutIds, 'Scout wave complete');
 
         for (const [label, cliOutput] of scoutOutputs) {
           const apiOutput = scoutApiResearch.get(label) || '';
@@ -994,6 +1044,7 @@ export const SwarmPanel: React.FC<SwarmPanelProps> = ({
         setStatusLabel(isRevision ? `Builder Revision ${iteration}` : 'Builders Working');
         const builderOutputs = await waitForAgents(builderIds);
         if (bailIfAborted()) return;
+        await dismissWaveAgents(builderIds, 'Builder wave complete');
         for (const [label, output] of builderOutputs) swarmState.artifacts.set(label, output);
         appendLog('dispatch', `Builder wave complete: ${builderAssignments.map((a) => a.label).join(', ')}`);
         refreshAgents();
@@ -1014,6 +1065,7 @@ export const SwarmPanel: React.FC<SwarmPanelProps> = ({
         setStatusLabel('Reviewers Evaluating');
         const reviewerOutputs = await waitForAgents(reviewerIds);
         if (bailIfAborted()) return;
+        await dismissWaveAgents(reviewerIds, 'Reviewer wave complete');
         for (const [label, output] of reviewerOutputs) swarmState.reviews.set(label, output);
         appendLog('dispatch', `Reviewer wave complete: ${reviewerAssignments.map((a) => a.label).join(', ')}`);
         refreshAgents();

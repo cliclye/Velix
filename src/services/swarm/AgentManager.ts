@@ -277,6 +277,15 @@ export class AgentManager {
   /** Set before `pty_kill` from post-`/exit` escalation so exit code is treated as success. */
   private completionForcedKill = new Set<string>();
 
+  /** Serialize PTY output handling per agent to avoid concurrent state mutations. */
+  private outputProcessing = new Map<string, Promise<void>>();
+
+  /** Dedup rapid prompt_detected events for the same pattern on one agent. */
+  private lastPromptMatch = new Map<string, string>();
+
+  /** Launch / prompt fallback timers — cleared on agent exit or cleanup. */
+  private armedTimers = new Map<string, ReturnType<typeof setTimeout>[]>();
+
   private initPromise: Promise<void> | null = null;
 
   constructor(eventEmitter: SwarmEventEmitter, workspacePath: string) {
@@ -300,9 +309,7 @@ export class AgentManager {
         if (!parsed) return;
         const agent = this.findAgentBySessionId(parsed.sessionId);
         if (agent) {
-          void this.handleAgentOutput(agent.id, parsed.data).catch((err) => {
-            console.error('AgentManager: output handler error:', err);
-          });
+          this.enqueueAgentOutput(agent.id, parsed.data);
         }
       });
 
@@ -324,14 +331,25 @@ export class AgentManager {
   // -----------------------------------------------------------------------
 
   async cleanup(): Promise<void> {
+    if (this.agents.size > 0) {
+      await this.terminateAll('Agent manager cleanup');
+    }
+
     this.initPromise = null;
     if (this.globalOutputListener) { this.globalOutputListener(); this.globalOutputListener = null; }
     if (this.globalExitListener)   { this.globalExitListener();   this.globalExitListener = null; }
+    this.agents.clear();
+    this.outputProcessing.clear();
+    this.lastPromptMatch.clear();
     this.agentPhase.clear();
     this.pendingPrompts.clear();
     this.outputAccumulator.clear();
     this.cliLaunchedAt.clear();
     this.promptDeliveredAt.clear();
+    for (const timers of this.armedTimers.values()) {
+      for (const t of timers) clearTimeout(t);
+    }
+    this.armedTimers.clear();
     for (const t of this.completionTimers.values()) {
       clearInterval(t as unknown as ReturnType<typeof setInterval>);
       clearTimeout(t);
@@ -341,6 +359,37 @@ export class AgentManager {
       this.clearExitEscalation(id);
     }
     this.completionForcedKill.clear();
+    this.outputCallbacks.length = 0;
+    this.exitCallbacks.length = 0;
+    this.spawnCallbacks.length = 0;
+  }
+
+  private armTimer(agentId: string, timer: ReturnType<typeof setTimeout>): void {
+    const list = this.armedTimers.get(agentId) ?? [];
+    list.push(timer);
+    this.armedTimers.set(agentId, list);
+  }
+
+  private clearArmedTimers(agentId: string): void {
+    const list = this.armedTimers.get(agentId);
+    if (!list) return;
+    for (const t of list) clearTimeout(t);
+    this.armedTimers.delete(agentId);
+  }
+
+  private enqueueAgentOutput(agentId: string, data: string): void {
+    const prev = this.outputProcessing.get(agentId) ?? Promise.resolve();
+    const next = prev
+      .then(() => this.handleAgentOutput(agentId, data))
+      .catch((err) => {
+        console.error('AgentManager: output handler error:', err);
+      });
+    this.outputProcessing.set(agentId, next);
+    void next.finally(() => {
+      if (this.outputProcessing.get(agentId) === next) {
+        this.outputProcessing.delete(agentId);
+      }
+    });
   }
 
   setPatternDetector(detector: (output: string) => PatternMatch | null): void {
@@ -384,9 +433,9 @@ export class AgentManager {
     }
 
     // Arm prompt delivery fallback — plain setTimeout, checks phase when it fires
-    setTimeout(() => {
+    this.armTimer(agentId, setTimeout(() => {
       void this.tryDeliverPrompt(agentId).catch(console.error);
-    }, PROMPT_DELIVERY_DELAY_MS);
+    }, PROMPT_DELIVERY_DELAY_MS));
   }
 
   /**
@@ -514,13 +563,8 @@ export class AgentManager {
         return;
       }
 
-      // Last resort: idle-looking tail + no PTY activity 20s (sitting at prompt after work)
-      if (idle && quietMs >= 20_000 && Date.now() - deliveredAt > 60_000) {
-        console.log(`AgentManager: ${agentId} idle + quiet 20s + working 60s — quitting CLI and escalating`);
-        clearInterval(poll);
-        this.completionTimers.delete(agentId);
-        this.sendCliQuitAndEscalateShellExit(agentId);
-      }
+      // Last resort removed: idle-looking tails alone caused false-positive kills on
+      // long-thinking agents. Completion requires an explicit done marker above.
     }, 5000);
 
     this.completionTimers.set(agentId, poll as unknown as ReturnType<typeof setTimeout>);
@@ -607,7 +651,11 @@ export class AgentManager {
     if (!agent) return;
 
     agent.lastActivityAt = new Date();
-    agent.terminalOutput = (agent.terminalOutput + data).slice(-MAX_TERMINAL_OUTPUT_CHARS);
+    const combined = agent.terminalOutput + data;
+    if (combined.length > MAX_TERMINAL_OUTPUT_CHARS) {
+      agent.terminalOutputEpoch = (agent.terminalOutputEpoch ?? 0) + 1;
+    }
+    agent.terminalOutput = combined.slice(-MAX_TERMINAL_OUTPUT_CHARS);
 
     const sanitized = sanitizeTerminalOutput(data);
     const phase = this.agentPhase.get(agentId);
@@ -659,8 +707,12 @@ export class AgentManager {
     if (this.patternDetector) {
       const match = this.patternDetector(sanitized);
       if (match) {
-        agent.metrics.promptsProcessed++;
-        this.eventEmitter.emitAgentEvent({ type: 'prompt_detected', agentId, match });
+        const dedupKey = `${match.patternId}:${match.matchedText}`;
+        if (this.lastPromptMatch.get(agentId) !== dedupKey) {
+          this.lastPromptMatch.set(agentId, dedupKey);
+          agent.metrics.promptsProcessed++;
+          this.eventEmitter.emitAgentEvent({ type: 'prompt_detected', agentId, match });
+        }
       }
     }
 
@@ -689,6 +741,8 @@ export class AgentManager {
     this.outputAccumulator.delete(agentId);
     this.cliLaunchedAt.delete(agentId);
     this.promptDeliveredAt.delete(agentId);
+    this.lastPromptMatch.delete(agentId);
+    this.clearArmedTimers(agentId);
     this.cancelCompletionTimer(agentId);
     this.clearExitEscalation(agentId);
 
@@ -812,6 +866,7 @@ export class AgentManager {
       lastActivityAt: new Date(),
       outputBuffer: [],
       terminalOutput: '',
+      terminalOutputEpoch: 0,
       metrics: {
         promptsProcessed: 0,
         filesModified: [],
@@ -832,9 +887,9 @@ export class AgentManager {
     this.pendingPrompts.set(agentId, shortInstruction);
 
     // Arm CLI launch fallback (plain setTimeout — checks phase when it fires)
-    setTimeout(() => {
+    this.armTimer(agentId, setTimeout(() => {
       void this.tryLaunchCli(agentId).catch(console.error);
-    }, CLI_LAUNCH_DELAY_MS);
+    }, CLI_LAUNCH_DELAY_MS));
 
     console.log(`AgentManager: spawned ${agentId} (session=${sessionId}, promptFile=${promptFileOk})`);
 
@@ -922,6 +977,8 @@ Restrictions: ${role.restrictions.join(', ')}
     this.agentPhase.delete(agentId);
     this.pendingPrompts.delete(agentId);
     this.promptDeliveredAt.delete(agentId);
+    this.lastPromptMatch.delete(agentId);
+    this.clearArmedTimers(agentId);
     this.cancelCompletionTimer(agentId);
     this.clearExitEscalation(agentId);
     this.completionForcedKill.delete(agentId);

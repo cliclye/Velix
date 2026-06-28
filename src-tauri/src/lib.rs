@@ -327,11 +327,13 @@ fn pty_create(
         .take_writer()
         .map_err(|e| format!("Failed to take writer: {}", e))?;
 
-    // Store the session
     let session = Arc::new(Mutex::new(PtySession { pair, writer }));
 
+    // Store the session — replace any existing session with the same id so reader
+    // threads cannot emit duplicate events for a recycled session id.
     {
         let mut sessions = state.pty_sessions.lock().map_err(|e| e.to_string())?;
+        sessions.remove(&session_id);
         sessions.insert(session_id.clone(), session);
     }
 

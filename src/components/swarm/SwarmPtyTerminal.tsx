@@ -83,6 +83,7 @@ export const SwarmPtyTerminal: React.FC<SwarmPtyTerminalProps> = ({
   const containerRef = useRef<HTMLDivElement>(null);
   const terminalRef = useRef<Terminal | null>(null);
   const renderedOutputRef = useRef('');
+  const renderedEpochRef = useRef(0);
   const resizeTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const followOutputRef = useRef(true);
 
@@ -178,6 +179,7 @@ export const SwarmPtyTerminal: React.FC<SwarmPtyTerminalProps> = ({
       terminal.dispose();
       terminalRef.current = null;
       renderedOutputRef.current = '';
+      renderedEpochRef.current = 0;
       followOutputRef.current = true;
     };
   }, [agent.id, agent.sessionId, interactive, onWriteInput, resizeSession, theme]);
@@ -188,30 +190,34 @@ export const SwarmPtyTerminal: React.FC<SwarmPtyTerminalProps> = ({
 
     const nextOutput = agent.terminalOutput || '';
     const previousOutput = renderedOutputRef.current;
+    const outputEpoch = agent.terminalOutputEpoch ?? 0;
     const shouldStickToBottom = followOutputRef.current;
 
     if (!nextOutput) {
       terminal.reset();
       terminal.writeln(`\x1b[90m${emptyText}\x1b[0m`);
       renderedOutputRef.current = '';
+      renderedEpochRef.current = outputEpoch;
       return;
     }
 
-    if (previousOutput.length === 0) {
+    if (
+      outputEpoch !== renderedEpochRef.current
+      || previousOutput.length === 0
+      || !nextOutput.startsWith(previousOutput)
+    ) {
       terminal.reset();
       terminal.write(nextOutput);
-    } else if (nextOutput.startsWith(previousOutput)) {
-      terminal.write(nextOutput.slice(previousOutput.length));
     } else {
-      terminal.reset();
-      terminal.write(nextOutput);
+      terminal.write(nextOutput.slice(previousOutput.length));
     }
 
     renderedOutputRef.current = nextOutput;
+    renderedEpochRef.current = outputEpoch;
     if (shouldStickToBottom) {
       terminal.scrollToBottom();
     }
-  }, [agent.id, agent.terminalOutput, emptyText, interactive, resizeSession, theme]);
+  }, [agent.id, agent.terminalOutput, agent.terminalOutputEpoch, emptyText, interactive, resizeSession, theme]);
 
   useEffect(() => {
     if (!autoFocus || !interactive) return;

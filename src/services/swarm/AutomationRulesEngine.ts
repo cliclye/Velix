@@ -299,7 +299,7 @@ export class AutomationRulesEngine {
     if (decision.requiresUserApproval) {
       // Add to pending approvals
       const approval: PendingApproval = {
-        id: `approval_${Date.now()}`,
+        id: `approval_${Date.now()}_${Math.random().toString(36).slice(2, 9)}`,
         agentId,
         patternMatch: decision.patternMatch,
         timestamp: new Date(),

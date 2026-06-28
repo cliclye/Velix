@@ -426,6 +426,16 @@ export const TerminalBlock = forwardRef<TerminalRef, TerminalBlockProps>(({
 
   // Create PTY session
   const createPtySession = useCallback(async (rows: number, cols: number) => {
+    const oldSessionId = sessionIdRef.current;
+    if (oldSessionId) {
+      sessionIdRef.current = "";
+      try {
+        await invoke("pty_kill", { sessionId: oldSessionId });
+      } catch {
+        // Session may already be dead.
+      }
+    }
+
     const sessionId = generateSessionId();
     sessionIdRef.current = sessionId;
     // Reset tracked dims so the first onResize after session creation always sends

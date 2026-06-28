@@ -114,7 +114,7 @@ export class OrchestratorCore {
     if (!this.agentManager) return;
 
     const agent = this.agentManager.getAgent(agentId);
-    if (!agent) return;
+    if (!agent || agent.status === 'terminated' || agent.status === 'waiting_for_approval') return;
 
     // Get policy decision
     const decision = this.automationRules.analyzeContext(match, agent);
@@ -496,6 +496,13 @@ export class OrchestratorCore {
 
     // For now, spawn a new implementer agent to fix issues
     if (this.agentManager && this.agentManager.getAgentCount() < this.config.maxAgents) {
+      const existingFixers = this.agentManager.getAgentsByRole('implementer');
+      for (const fixer of existingFixers) {
+        if (fixer.status === 'running' || fixer.status === 'waiting_for_input' || fixer.status === 'waiting_for_approval') {
+          await this.agentManager.terminateAgent(fixer.id, 'Replacing fix agent');
+        }
+      }
+
       const role = this.roleSystem.getRole('implementer');
       const fixTask = 'Review the build/test errors and fix them. Run the tests again after fixing.';
       await this.agentManager.spawnAgent(role, fixTask);
@@ -581,15 +588,20 @@ export class OrchestratorCore {
    */
   async killSwitch(): Promise<void> {
     await this.safetyLimiter.emergencyStop(this.agentManager);
-    this.state = 'failed';
-    await this.cleanup();
+    this.automationRules.clearPendingApprovals();
+    if (this.state === 'idle' || this.state === 'completed' || this.state === 'failed') {
+      return;
+    }
+    await this.transitionTo('aborting');
   }
 
   /**
    * Clean up resources
    */
   private async cleanup(): Promise<void> {
-    await this.agentManager?.cleanup();
+    if (this.agentManager) {
+      await this.agentManager.cleanup();
+    }
     this.currentTask = null;
     this.retryCount.clear();
     this.state = 'idle';

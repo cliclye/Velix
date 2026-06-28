@@ -9,6 +9,8 @@ interface UseAgentOutputOptions {
   agentId?: string;
   maxLines?: number;
   autoScroll?: boolean;
+  /** Re-run subscriptions when orchestrator finishes initializing. */
+  isInitialized?: boolean;
 }
 
 interface UseAgentOutputReturn {
@@ -19,7 +21,7 @@ interface UseAgentOutputReturn {
 }
 
 export function useAgentOutput(options: UseAgentOutputOptions = {}): UseAgentOutputReturn {
-  const { agentId, maxLines = 1000, autoScroll: _autoScroll = true } = options;
+  const { agentId, maxLines = 1000, autoScroll: _autoScroll = true, isInitialized = true } = options;
 
   const [output, setOutput] = useState<string[]>([]);
   const [isActive, setIsActive] = useState(false);
@@ -27,6 +29,8 @@ export function useAgentOutput(options: UseAgentOutputOptions = {}): UseAgentOut
 
   // Subscribe to agent output
   useEffect(() => {
+    if (!isInitialized) return;
+
     // Reset output when agent changes
     outputRef.current = [];
     setOutput([]);
@@ -52,10 +56,12 @@ export function useAgentOutput(options: UseAgentOutputOptions = {}): UseAgentOut
     });
 
     return unsubscribe;
-  }, [agentId, maxLines]);
+  }, [agentId, isInitialized, maxLines]);
 
   // Subscribe to agent exit
   useEffect(() => {
+    if (!isInitialized) return;
+
     const manager = orchestrator.getAgentManager();
     if (!manager) return;
 
@@ -66,7 +72,7 @@ export function useAgentOutput(options: UseAgentOutputOptions = {}): UseAgentOut
     });
 
     return unsubscribe;
-  }, [agentId]);
+  }, [agentId, isInitialized]);
 
   // Clear output
   const clearOutput = useCallback(() => {
@@ -88,7 +94,10 @@ export function useAgentOutput(options: UseAgentOutputOptions = {}): UseAgentOut
 /**
  * useAllAgentsOutput - Subscribe to output from all agents
  */
-export function useAllAgentsOutput(maxLinesPerAgent: number = 100): {
+export function useAllAgentsOutput(
+  maxLinesPerAgent: number = 100,
+  isInitialized: boolean = true,
+): {
   outputs: Map<string, string[]>;
   getAgentOutput: (agentId: string) => string[];
   clearAllOutput: () => void;
@@ -97,6 +106,8 @@ export function useAllAgentsOutput(maxLinesPerAgent: number = 100): {
   const outputsRef = useRef<Map<string, string[]>>(new Map());
 
   useEffect(() => {
+    if (!isInitialized) return;
+
     const manager = orchestrator.getAgentManager();
     if (!manager) return;
 
@@ -111,7 +122,7 @@ export function useAllAgentsOutput(maxLinesPerAgent: number = 100): {
     });
 
     return unsubscribe;
-  }, [maxLinesPerAgent]);
+  }, [isInitialized, maxLinesPerAgent]);
 
   const getAgentOutput = useCallback((agentId: string): string[] => {
     return outputs.get(agentId) || [];

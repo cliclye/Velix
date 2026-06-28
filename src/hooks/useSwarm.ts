@@ -133,6 +133,9 @@ export function useSwarm(options: UseSwarmOptions): UseSwarmReturn {
   useEffect(() => {
     if (!isInitialized) return;
 
+    setState(orchestratorRef.current.getState());
+    setTask(orchestratorRef.current.getTask());
+
     const unsubscribe = orchestratorRef.current.onStateChange((newState, newTask) => {
       setState(newState);
       setTask(newTask);
@@ -145,11 +148,16 @@ export function useSwarm(options: UseSwarmOptions): UseSwarmReturn {
   useEffect(() => {
     if (!isInitialized) return;
 
+    const manager = orchestratorRef.current.getAgentManager();
+    if (manager) {
+      setAgents(manager.getAllAgents());
+    }
+
     const emitter = orchestratorRef.current.getEventEmitter();
     const unsubscribe = emitter.subscribeToAgentEvents(() => {
-      const manager = orchestratorRef.current.getAgentManager();
-      if (manager) {
-        setAgents(manager.getAllAgents());
+      const activeManager = orchestratorRef.current.getAgentManager();
+      if (activeManager) {
+        setAgents(activeManager.getAllAgents());
       }
     });
 
@@ -235,6 +243,7 @@ export function useSwarm(options: UseSwarmOptions): UseSwarmReturn {
   const abortTask = useCallback(async () => {
     try {
       await orchestratorRef.current.abortTask();
+      orchestratorRef.current.getAutomationRules().clearPendingApprovals();
       setPendingApprovals([]);
       setError(null);
     } catch (err) {
@@ -246,8 +255,11 @@ export function useSwarm(options: UseSwarmOptions): UseSwarmReturn {
   const killSwitch = useCallback(async () => {
     try {
       await orchestratorRef.current.killSwitch();
+      orchestratorRef.current.getAutomationRules().clearPendingApprovals();
       setAgents([]);
       setPendingApprovals([]);
+      setState(orchestratorRef.current.getState());
+      setTask(orchestratorRef.current.getTask());
       setError(null);
     } catch (err) {
       setError(`Kill switch failed: ${err}`);
