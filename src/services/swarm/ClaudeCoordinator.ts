@@ -708,8 +708,8 @@ export class ClaudeCoordinator {
       '- If you need files outside your lane, stop and report the ownership gap instead of guessing.',
       '- Keep status updates short and operational. Mention touched files, validations, and blockers in your final summary.',
       '- Prioritize shipping code over conversation. Escalate quickly if blocked.',
-      '- Do NOT ask follow-up questions or request clarification. Work with the information you have. If anything is ambiguous, make a reasonable decision and note it in your summary.',
-      '- When your assigned work is fully complete, end this interactive session using your CLI\'s normal quit flow (e.g. /exit, exit, quit, or Ctrl+D — see your tool\'s docs) so the swarm can continue.',
+      '- Do NOT ask follow-up questions or request clarification. You are running non-interactively — nobody can answer. Work with the information you have. If anything is ambiguous, make a reasonable decision and note it in your summary.',
+      '- You are running in one-shot mode: do all your work, then print your final structured report block (as defined in your role instructions) as the last thing in your output.',
     );
 
     if (maxMode) {

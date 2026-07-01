@@ -2,14 +2,14 @@ import React, { useState, useEffect, useRef, useCallback, useMemo } from 'react'
 import {
   AgentManager,
   SwarmEventEmitter,
-  AutomationRulesEngine,
+  SwarmRunner,
   getRole,
   claudeCoordinator,
   getWorkerCLIOptions,
   detectWorkerCLIAvailability,
 } from '../../services/swarm';
 import { CoordinatorConfig } from '../../services/swarm/ClaudeCoordinator';
-import { Agent, AgentRoleType, AgentStatus, PatternMatch, WorkerCLI } from '../../services/swarm/types';
+import { Agent, AgentRoleType, AgentStatus, WorkerCLI } from '../../services/swarm/types';
 import { PROVIDERS, ProviderID } from '../../services/ai/types';
 import { AgentTerminal } from './AgentTerminal';
 import { SwarmPtyTerminal } from './SwarmPtyTerminal';
@@ -327,7 +327,6 @@ export const SwarmPanel: React.FC<SwarmPanelProps> = ({
   workspacePath,
 }) => {
   const managerRef = useRef<AgentManager | null>(null);
-  const automationRulesRef = useRef<AutomationRulesEngine | null>(null);
   const syncIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
   /** Prevents overlapping coordinator syncs when the 45s interval fires with a stale `isSyncing` closure. */
   const coordinatorSyncInFlightRef = useRef(false);
@@ -450,42 +449,12 @@ export const SwarmPanel: React.FC<SwarmPanelProps> = ({
     }
 
     const emitter = new SwarmEventEmitter();
-    const rules = new AutomationRulesEngine();
-    automationRulesRef.current = rules;
     const manager = new AgentManager(emitter, workspacePath);
-    manager.setPatternDetector((output) => rules.detectPrompt(output));
     manager.setWorkerCLI(workerCLI);
     managerRef.current = manager;
 
-    const handlePromptDetected = async (agentId: string, match: PatternMatch) => {
-      const agent = manager.getAgent(agentId);
-      if (!agent || agent.status === 'terminated' || agent.status === 'waiting_for_approval') return;
-
-      const decision = rules.analyzeContext(match, agent);
-      if (!decision.requiresUserApproval) {
-        await rules.executeAction(decision, agentId, manager);
-        if (decision.action === 'approve') {
-          manager.updateAgentMetrics(agentId, {
-            autoApprovals: (agent.metrics.autoApprovals || 0) + 1,
-          });
-        }
-      } else {
-        manager.updateAgentStatus(agentId, 'waiting_for_approval');
-        manager.updateAgentMetrics(agentId, {
-          escalations: (agent.metrics.escalations || 0) + 1,
-        });
-      }
-    };
-
     let disposed = false;
     setSwarmPtyReady(false);
-
-    const unsubscribeAutomation = emitter.subscribeToAgentEvents((event) => {
-      if (disposed || event.type !== 'prompt_detected') return;
-      void handlePromptDetected(event.agentId, event.match).catch((err) => {
-        console.error('SwarmPanel: prompt automation error:', err);
-      });
-    });
 
     manager.initialize()
       .then(() => {
@@ -526,7 +495,6 @@ export const SwarmPanel: React.FC<SwarmPanelProps> = ({
       unsubscribeOutput();
       unsubscribeExit();
       unsubscribeSpawn();
-      unsubscribeAutomation();
       void (async () => {
         try {
           await manager.terminateAll('Swarm panel closed');
@@ -538,7 +506,6 @@ export const SwarmPanel: React.FC<SwarmPanelProps> = ({
         } catch {
           // Best-effort teardown.
         }
-        automationRulesRef.current = null;
         if (managerRef.current === manager) {
           managerRef.current = null;
         }
@@ -628,18 +595,12 @@ export const SwarmPanel: React.FC<SwarmPanelProps> = ({
       setLastSync(syncResult);
       appendLog('sync', syncResult.summary);
 
+      // One-shot headless workers cannot receive mid-run input, so coordinator
+      // actions are surfaced as monitoring guidance instead of being dispatched.
       for (const action of syncResult.actions) {
-        const target = snapshot.find(
-          (agent) =>
-            agent.assignmentId === action.assignmentId && !FINISHED_STATUSES.has(agent.status),
-        );
-        if (!target) continue;
-
-        await manager.sendToAgent(
-          target.id,
-          `\nCoordinator update:\n${action.message}\r`,
-        );
-        appendLog('dispatch', `Sent coordinator follow-up to ${target.label || target.role.name}.`);
+        const target = snapshot.find((agent) => agent.assignmentId === action.assignmentId);
+        const label = target?.label || target?.role.name || action.assignmentId;
+        appendLog('sync', `Coordinator note for ${label}: ${action.message}`);
       }
 
       refreshAgents();
@@ -776,335 +737,26 @@ export const SwarmPanel: React.FC<SwarmPanelProps> = ({
 
       if (bailIfAborted()) return;
 
-      // --- Shared swarm state ---
-      const swarmState = {
-        research: new Map<string, string>(),   // Scout findings keyed by label
-        artifacts: new Map<string, string>(),   // Builder outputs keyed by label
-        reviews: new Map<string, string>(),     // Reviewer outputs keyed by label
-      };
+      // --- Run the swarm pipeline (scouts → builders ⇄ reviewers → verdict) ---
+      const runner = new SwarmRunner(manager, {
+        onLog: appendLog,
+        onStatus: setStatusLabel,
+        onAgentsChanged: refreshAgents,
+      });
 
-      // Helper: wait for a set of agent IDs to finish, return their outputs by assignment label.
-      // Includes a per-agent stall timeout: if an agent has no output activity for this long,
-      // it is forcibly terminated so the swarm can proceed.
-      const AGENT_STALL_TIMEOUT_MS = 120_000; // 2 minutes of no activity
-      const AGENT_STALL_CHECK_INTERVAL_MS = 10_000; // check every 10 seconds
-
-      const waitForAgents = (agentIds: string[]): Promise<Map<string, string>> =>
-        new Promise<Map<string, string>>((resolve, reject) => {
-          if (agentIds.length === 0) {
-            resolve(new Map());
-            return;
-          }
-
-          if (abort.signal.aborted) {
-            reject(new DOMException('Swarm stopped by user', 'AbortError'));
-            return;
-          }
-
-          const outputs = new Map<string, string>();
-          const pending = new Set(agentIds);
-          let resolved = false;
-          let stallChecker: ReturnType<typeof setInterval> | undefined;
-
-          const clearStallChecker = () => {
-            if (stallChecker !== undefined) {
-              clearInterval(stallChecker);
-              stallChecker = undefined;
-            }
-          };
-
-          const finish = () => {
-            if (resolved) return;
-            resolved = true;
-            unsubscribe();
-            clearStallChecker();
-            abort.signal.removeEventListener('abort', onAbort);
-            resolve(outputs);
-          };
-
-          const onAbort = () => {
-            if (resolved) return;
-            resolved = true;
-            unsubscribe();
-            clearStallChecker();
-            abort.signal.removeEventListener('abort', onAbort);
-            reject(new DOMException('Swarm stopped by user', 'AbortError'));
-          };
-          abort.signal.addEventListener('abort', onAbort);
-
-          const collectAgent = (agentId: string) => {
-            const agent = manager.getAgent(agentId);
-            if (!agent) return;
-
-            const assignment = plan.assignments.find(
-              (a) => a.id === agent.assignmentId || a.label === agent.label,
-            );
-            const label = assignment?.label || agent.label || agent.role.name;
-            if (!label) return;
-
-            const handoff = manager.getAgentHandoffOutput(agentId);
-            if (handoff.trim()) {
-              outputs.set(label, handoff);
-            } else {
-              appendLog('error', `Agent ${label} finished with no readable CLI output for coordinator handoff.`);
-            }
-          };
-
-          const unsubscribe = manager.onAgentExit((agentId) => {
-            if (resolved || !pending.delete(agentId)) return;
-            collectAgent(agentId);
-            if (pending.size === 0) finish();
-          });
-
-          stallChecker = setInterval(() => {
-            if (resolved) {
-              clearStallChecker();
-              return;
-            }
-            const now = Date.now();
-            for (const id of pending) {
-              const agent = manager.getAgent(id);
-              if (!agent) { pending.delete(id); continue; }
-              // Also pick up agents that finished without us noticing
-              if (FINISHED_STATUSES.has(agent.status)) {
-                pending.delete(id);
-                collectAgent(id);
-                continue;
-              }
-              const timeSinceActivity = now - agent.lastActivityAt.getTime();
-              if (timeSinceActivity > AGENT_STALL_TIMEOUT_MS) {
-                appendLog('error', `Agent ${agent.label || id} stalled (no activity for ${Math.round(timeSinceActivity / 1000)}s) — terminating.`);
-                void manager.terminateAgent(id, 'Stall timeout');
-              }
-            }
-            if (pending.size === 0) finish();
-          }, AGENT_STALL_CHECK_INTERVAL_MS);
-
-          // Check agents that already exited before subscription
-          for (const id of agentIds) {
-            const agent = manager.getAgent(id);
-            if (agent && FINISHED_STATUSES.has(agent.status)) {
-              if (pending.delete(id)) collectAgent(id);
-            }
-          }
-          if (!resolved && pending.size === 0) finish();
-        });
-
-      const dismissWaveAgents = async (agentIds: string[], reason: string) => {
-        if (agentIds.length === 0) return;
-        await Promise.all(agentIds.map((id) => manager.terminateAgent(id, reason).catch(() => {})));
-        refreshAgents();
-      };
-
-      // Helper: spawn a wave of assignments, return their agent IDs.
-      // When passAllContext is true, all depOutputs are injected regardless of the assignment's dependency list.
-      const spawnWave = async (
-        assignments: SwarmAssignment[],
-        taskOverrides?: Map<string, string>,
-        depOutputs?: Map<string, string>,
-        passAllContext?: boolean,
-      ): Promise<string[]> => {
-        const agentIds: string[] = [];
-        await Promise.all(assignments.map(async (assignment, index) => {
-          // Stagger PTY spawns slightly to avoid macOS/login-shell races when many agents start at once.
-          await new Promise((r) => setTimeout(r, index * 150));
-          if (abort.signal.aborted) {
-            throw new DOMException('Swarm stopped by user', 'AbortError');
-          }
-          const role = getRole(assignment.role);
-
-          // Use task override (revision) or build normal worker task with dependency context
-          let workerTask: string;
-          if (taskOverrides?.has(assignment.label)) {
-            workerTask = taskOverrides.get(assignment.label)!;
-          } else {
-            let deps: Map<string, string>;
-            if (passAllContext && depOutputs) {
-              // Pass all available context (used for reviewers who need full picture)
-              deps = depOutputs;
-            } else {
-              deps = new Map<string, string>();
-              if (depOutputs) {
-                for (const depLabel of assignment.dependencies) {
-                  const output = depOutputs.get(depLabel);
-                  if (output) deps.set(depLabel, output);
-                }
-              }
-            }
-            workerTask = claudeCoordinator.buildWorkerTask(
-              trimmedGoal, plan, assignment, deps.size > 0 ? deps : undefined, maxMode,
-            );
-          }
-
-          const agent = await manager.spawnAgent(role, workerTask, {
-            assignmentId: assignment.id,
-            label: assignment.label,
-            ownedFiles: assignment.ownedFiles,
-          });
-          agentIds.push(agent.id);
-          appendLog('dispatch', `Launched ${assignment.label}.`);
-        }));
-        refreshAgents();
-        return agentIds;
-      };
-
-      // --- Phase 1: Scout wave (hybrid: API research + CLI analysis) ---
-      const scoutAssignments = plan.assignments.filter((a) => a.role === 'scout');
-      if (scoutAssignments.length > 0) {
-        // Phase 1a: External research via API (parallel for all scouts)
-        setStatusLabel('Scout Research (API)');
-        const scoutApiResearch = new Map<string, string>();
-        await Promise.all(scoutAssignments.map(async (assignment) => {
-          try {
-            appendLog('dispatch', `Scout ${assignment.label}: running external research via API…`);
-            const research = await claudeCoordinator.scoutResearch(
-              trimmedGoal, assignment.task, coordinatorConfig, maxMode,
-            );
-            scoutApiResearch.set(assignment.label, research);
-            appendLog('dispatch', `Scout ${assignment.label}: external research complete.`);
-          } catch (err) {
-            const msg = err instanceof Error ? err.message : String(err);
-            appendLog('error', `Scout ${assignment.label} API research failed: ${msg}`);
-          }
-        }));
-        if (bailIfAborted()) return;
-
-        // Phase 1b: Internal analysis via CLI — inject API research as context
-        setStatusLabel('Scout Mapping (CLI)');
-        const scoutTaskOverrides = new Map<string, string>();
-        for (const assignment of scoutAssignments) {
-          const apiResearch = scoutApiResearch.get(assignment.label);
-          if (apiResearch) {
-            const baseTask = claudeCoordinator.buildWorkerTask(
-              trimmedGoal, plan, assignment, undefined, maxMode,
-            );
-            scoutTaskOverrides.set(
-              assignment.label,
-              baseTask
-                + '\n\n--- External Research Context (from API) ---\n'
-                + apiResearch
-                + '\n--- End External Research ---\n\n'
-                + 'Use the above external research to inform your codebase analysis. '
-                + 'Focus on internal code paths, file structure, and risks specific to this project.',
-            );
-          }
-        }
-
-        const scoutIds = await spawnWave(
-          scoutAssignments,
-          scoutTaskOverrides.size > 0 ? scoutTaskOverrides : undefined,
-        );
-        const scoutOutputs = await waitForAgents(scoutIds);
-        if (bailIfAborted()) return;
-        await dismissWaveAgents(scoutIds, 'Scout wave complete');
-
-        for (const [label, cliOutput] of scoutOutputs) {
-          const apiOutput = scoutApiResearch.get(label) || '';
-          swarmState.research.set(label, apiOutput ? `${apiOutput}\n\n---\n\n${cliOutput}` : cliOutput);
-        }
-        appendLog('dispatch', `Scout wave complete: ${scoutAssignments.map((a) => a.label).join(', ')}`);
-        refreshAgents();
-      } else {
-        appendLog('dispatch', 'No scouts configured — builders will work without pre-mapping.');
-      }
-
-      // Combine all scout research for builder context
-      const allResearch = new Map<string, string>([...swarmState.research]);
-
-      // --- Phase 2+3: Builder → Reviewer iteration loop ---
-      const builderAssignments = plan.assignments.filter((a) => a.role === 'builder');
-      const reviewerAssignments = plan.assignments.filter((a) => a.role === 'reviewer');
-
-      if (builderAssignments.length === 0) {
-        appendLog('error', 'Coordinator plan has no builder assignments. Cannot proceed.');
-        setError('Launch failed: no builder assignments in coordinator plan.');
-        refreshAgents();
-        setStatusLabel('Launch Error');
-        setIsLaunching(false);
-        return;
-      }
-
-      let iteration = 0;
-      let approved = false;
-      let lastRevisionInstructions = '';
-
-      while (!approved && iteration < MAX_REVIEW_ITERATIONS && !abort.signal.aborted) {
-        iteration++;
-        const isRevision = iteration > 1;
-
-        // --- Phase 2: Builder wave ---
-        setStatusLabel(isRevision ? `Launching Builder Revision ${iteration}` : 'Launching Builders');
-
-        let builderTaskOverrides: Map<string, string> | undefined;
-        if (isRevision && lastRevisionInstructions) {
-          builderTaskOverrides = new Map();
-          for (const assignment of builderAssignments) {
-            const prevOutput = swarmState.artifacts.get(assignment.label) || '';
-            const revisionTask = claudeCoordinator.buildRevisionTask(
-              trimmedGoal, plan, assignment, prevOutput, lastRevisionInstructions, iteration, maxMode,
-            );
-            builderTaskOverrides.set(assignment.label, revisionTask);
-          }
-          appendLog('review', `Revision round ${iteration} — sending builders back with reviewer feedback.`);
-        }
-
-        const builderIds = await spawnWave(builderAssignments, builderTaskOverrides, allResearch, false);
-        setStatusLabel(isRevision ? `Builder Revision ${iteration}` : 'Builders Working');
-        const builderOutputs = await waitForAgents(builderIds);
-        if (bailIfAborted()) return;
-        await dismissWaveAgents(builderIds, 'Builder wave complete');
-        for (const [label, output] of builderOutputs) swarmState.artifacts.set(label, output);
-        appendLog('dispatch', `Builder wave complete: ${builderAssignments.map((a) => a.label).join(', ')}`);
-        refreshAgents();
-
-        // --- Phase 3: Reviewer wave ---
-        if (reviewerAssignments.length === 0) {
-          appendLog('review', 'No reviewers configured — marking work as complete.');
-          approved = true;
-          break;
-        }
-
-        setStatusLabel('Launching Reviewers');
-
-        if (bailIfAborted()) return;
-
-        const reviewerContext = new Map<string, string>([...allResearch, ...swarmState.artifacts]);
-        const reviewerIds = await spawnWave(reviewerAssignments, undefined, reviewerContext, true);
-        setStatusLabel('Reviewers Evaluating');
-        const reviewerOutputs = await waitForAgents(reviewerIds);
-        if (bailIfAborted()) return;
-        await dismissWaveAgents(reviewerIds, 'Reviewer wave complete');
-        for (const [label, output] of reviewerOutputs) swarmState.reviews.set(label, output);
-        appendLog('dispatch', `Reviewer wave complete: ${reviewerAssignments.map((a) => a.label).join(', ')}`);
-        refreshAgents();
-
-        // --- Phase 4: Coordinator evaluates review verdict ---
-        setStatusLabel('Coordinator Evaluating Review');
-
-        if (bailIfAborted()) return;
-
-        const evaluation = await claudeCoordinator.evaluateReview(
-          trimmedGoal, swarmState.reviews, swarmState.artifacts, coordinatorConfig,
-        );
-
-        if (bailIfAborted()) return;
-
-        appendLog('review', `Coordinator verdict: ${evaluation.verdict} — ${evaluation.summary}`);
-        lastRevisionInstructions = evaluation.revisionInstructions;
-
-        if (evaluation.verdict === 'APPROVED') {
-          approved = true;
-          appendLog('review', 'All work approved by coordinator. Swarm complete.');
-        } else if (iteration >= MAX_REVIEW_ITERATIONS) {
-          appendLog('review', `Max review iterations (${MAX_REVIEW_ITERATIONS}) reached. Accepting current state.`);
-          approved = true;
-        }
-        // Otherwise loop continues — builders will be re-spawned with revision feedback
-      }
+      const outcome = await runner.run({
+        goal: trimmedGoal,
+        workspacePath,
+        plan,
+        coordinatorConfig,
+        maxMode,
+        maxReviewIterations: MAX_REVIEW_ITERATIONS,
+        signal: abort.signal,
+      });
 
       refreshAgents();
       if (!abort.signal.aborted) {
-        setStatusLabel(approved ? 'Complete' : 'Running');
+        setStatusLabel(outcome.approved ? 'Complete' : 'Running');
       }
     } catch (err) {
       if (err instanceof DOMException && err.name === 'AbortError') {

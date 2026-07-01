@@ -12,12 +12,16 @@ export {
   AgentManager,
   WORKER_CLI_OPTIONS,
   getWorkerCLIOptions,
-  getCliReadyPatterns,
+  buildHeadlessCommand,
   loadCustomCLIOptions,
   saveCustomCLIOptions,
   detectWorkerCLIAvailability,
+  DEFAULT_AGENT_TIMEOUT_MS,
+  MAX_MODE_AGENT_TIMEOUT_MS,
 } from './AgentManager';
-export type { WorkerCLIOption } from './AgentManager';
+export type { WorkerCLIOption, AgentRunResult } from './AgentManager';
+export { SwarmRunner } from './SwarmRunner';
+export type { SwarmRunnerCallbacks, SwarmRunOptions, SwarmRunOutcome, SwarmLogKind } from './SwarmRunner';
 export { SwarmEventEmitter, swarmEvents } from './SwarmEventEmitter';
 
 // Role system
