@@ -1,0 +1,492 @@
+version: c47bb3e59ea5ed14
+---
+{
+    "findings": [
+        {
+            "title": "AI model file-write blocks are expanded into shell commands without quoting or heredoc hardening, allowing arbitrary command execution.",
+            "status": "active",
+            "commit_hash": "1c8828e8226c03f113a39caad4b3d362aafa1464",
+            "detected_at_pst": "2026-05-12T18:36:04-07:00",
+            "reported_link": "",
+            "severity": "critical",
+            "location": "src/App.tsx"
+        },
+        {
+            "title": "Terminal AI FILE blocks resolve paths without project-boundary checks, allowing writes outside the opened project via traversal or absolute paths.",
+            "status": "active",
+            "commit_hash": "437bc29c05d11b61fd965fea0726593507bd0bf5",
+            "detected_at_pst": "2026-06-13T10:03:10-07:00",
+            "reported_link": "",
+            "severity": "high",
+            "location": "src/components/TerminalBlock.tsx"
+        },
+        {
+            "title": "Swarm automation defaults auto-approve agent confirmation prompts, including file overwrite requests, without blocking sensitive out-of-project paths.",
+            "status": "active",
+            "commit_hash": "437bc29c05d11b61fd965fea0726593507bd0bf5",
+            "detected_at_pst": "2026-06-13T10:03:10-07:00",
+            "reported_link": "",
+            "severity": "high",
+            "location": "src/services/swarm/automationPatterns.ts"
+        },
+        {
+            "title": "Project file enumeration follows repository symlinks and loads out-of-project files into AI context sent to external providers.",
+            "status": "active",
+            "commit_hash": "437bc29c05d11b61fd965fea0726593507bd0bf5",
+            "detected_at_pst": "2026-06-14T10:07:04-07:00",
+            "reported_link": "",
+            "severity": "high",
+            "location": "src-tauri/src/lib.rs"
+        },
+        {
+            "title": "resolveAiWritePath validates string prefixes but not symlink targets, so AI file writes can escape the opened project through symlinked paths.",
+            "status": "active",
+            "commit_hash": "437bc29c05d11b61fd965fea0726593507bd0bf5",
+            "detected_at_pst": "2026-06-14T10:07:04-07:00",
+            "reported_link": "",
+            "severity": "high",
+            "location": "src/App.tsx"
+        },
+        {
+            "title": "Velix injects stored AI provider API keys into every PTY shell environment, enabling exfiltration by malicious project scripts.",
+            "status": "active",
+            "commit_hash": "437bc29c05d11b61fd965fea0726593507bd0bf5",
+            "detected_at_pst": "2026-06-15T10:08:03-07:00",
+            "reported_link": "",
+            "severity": "high",
+            "location": "src-tauri/src/lib.rs"
+        },
+        {
+            "title": "Swarm post-task validation automatically executes repository npm/yarn build, test, and lint scripts without user confirmation.",
+            "status": "active",
+            "commit_hash": "437bc29c05d11b61fd965fea0726593507bd0bf5",
+            "detected_at_pst": "2026-06-17T10:15:00-07:00",
+            "reported_link": "",
+            "severity": "high",
+            "location": "src/services/swarm/SupervisorValidator.ts"
+        },
+        {
+            "title": "Swarm launches Claude Code workers with --dangerously-skip-permissions, disabling all CLI tool permission gates by default.",
+            "status": "active",
+            "commit_hash": "437bc29c05d11b61fd965fea0726593507bd0bf5",
+            "detected_at_pst": "2026-06-18T10:05:52-07:00",
+            "reported_link": "",
+            "severity": "high",
+            "location": "src/services/swarm/AgentManager.ts"
+        },
+        {
+            "title": "Terminal AI suggested-command shortcuts execute model-controlled shell commands on a single digit keypress with no confirmation dialog.",
+            "status": "active",
+            "commit_hash": "437bc29c05d11b61fd965fea0726593507bd0bf5",
+            "detected_at_pst": "2026-06-19T10:10:24-07:00",
+            "reported_link": "",
+            "severity": "high",
+            "location": "src/components/TerminalBlock.tsx"
+        },
+        {
+            "title": "get_git_diff passes attacker-controlled file paths to git diff without a -- separator, enabling option injection that writes diff output to arbitrary repo paths.",
+            "status": "active",
+            "commit_hash": "437bc29c05d11b61fd965fea0726593507bd0bf5",
+            "detected_at_pst": "2026-06-19T10:10:24-07:00",
+            "reported_link": "",
+            "severity": "medium",
+            "location": "src-tauri/src/lib.rs"
+        },
+        {
+            "title": "Velix Git panel operations execute repository git hooks without sandboxing, enabling arbitrary command execution from malicious project .git metadata.",
+            "status": "active",
+            "commit_hash": "437bc29c05d11b61fd965fea0726593507bd0bf5",
+            "detected_at_pst": "2026-06-22T10:05:00-07:00",
+            "reported_link": "",
+            "severity": "high",
+            "location": "src-tauri/src/lib.rs"
+        },
+        {
+            "title": "Terminal npm Tab-autocomplete suggests attacker-controlled package.json scripts, enabling trojan command execution after Tab+Enter.",
+            "status": "active",
+            "commit_hash": "437bc29c05d11b61fd965fea0726593507bd0bf5",
+            "detected_at_pst": "2026-06-23T10:20:04-07:00",
+            "reported_link": "",
+            "severity": "high",
+            "location": "src/components/TerminalBlock.tsx"
+        },
+        {
+            "title": "AI-powered terminal autocomplete embeds attacker-controlled package.json script names in the model prompt, enabling trojan shell command execution after Tab+Enter.",
+            "status": "active",
+            "commit_hash": "437bc29c05d11b61fd965fea0726593507bd0bf5",
+            "detected_at_pst": "2026-06-24T10:02:35-07:00",
+            "reported_link": "",
+            "severity": "high",
+            "location": "src/components/TerminalBlock.tsx"
+        },
+        {
+            "title": "Terminal npm Tab-autocomplete interpolates unquoted package.json script names, enabling shell command injection via malicious script keys.",
+            "status": "active",
+            "commit_hash": "437bc29c05d11b61fd965fea0726593507bd0bf5",
+            "detected_at_pst": "2026-06-25T10:12:58-07:00",
+            "reported_link": "",
+            "severity": "high",
+            "location": "src/components/TerminalBlock.tsx"
+        },
+        {
+            "title": "Custom worker CLI commands are stored and launched without shell quoting or metacharacter validation, enabling arbitrary command execution.",
+            "status": "active",
+            "commit_hash": "437bc29c05d11b61fd965fea0726593507bd0bf5",
+            "detected_at_pst": "2026-06-26T10:09:44-07:00",
+            "reported_link": "",
+            "severity": "high",
+            "location": "src/components/Settings.tsx"
+        },
+        {
+            "title": "git_checkout_branch passes branch names to git checkout without a -- separator, so a malicious -f branch ref is parsed as the force flag and discards uncommitted work.",
+            "status": "active",
+            "commit_hash": "437bc29c05d11b61fd965fea0726593507bd0bf5",
+            "detected_at_pst": "2026-06-26T10:09:44-07:00",
+            "reported_link": "",
+            "severity": "medium",
+            "location": "src-tauri/src/lib.rs"
+        },
+        {
+            "title": "Velix get_git_diff runs git diff without disabling repository-configured external diff drivers, enabling arbitrary command execution when the Git panel loads file diffs.",
+            "status": "active",
+            "commit_hash": "437bc29c05d11b61fd965fea0726593507bd0bf5",
+            "detected_at_pst": "2026-06-27T10:25:59-07:00",
+            "reported_link": "",
+            "severity": "high",
+            "location": "src-tauri/src/lib.rs"
+        },
+        {
+            "title": "Velix Git checkout executes repository-configured smudge/clean filter drivers without sandboxing, enabling arbitrary command execution when switching branches.",
+            "status": "active",
+            "commit_hash": "69947414d59b4fb291054cf4ea73349895f91b3a",
+            "detected_at_pst": "2026-06-29T10:12:01-07:00",
+            "reported_link": "",
+            "severity": "high",
+            "location": "src-tauri/src/lib.rs"
+        },
+        {
+            "title": "Velix git fetch and pull execute repository-configured credential helpers without sandboxing, enabling arbitrary command execution.",
+            "status": "active",
+            "commit_hash": "69947414d59b4fb291054cf4ea73349895f91b3a",
+            "detected_at_pst": "2026-06-30T10:10:39-07:00",
+            "reported_link": "",
+            "severity": "high",
+            "location": "src-tauri/src/lib.rs"
+        },
+        {
+            "title": "Velix git pull executes repository-configured merge drivers without sandboxing, enabling arbitrary command execution when pulls merge divergent branches.",
+            "status": "active",
+            "commit_hash": "69947414d59b4fb291054cf4ea73349895f91b3a",
+            "detected_at_pst": "2026-07-01T10:13:55-07:00",
+            "reported_link": "",
+            "severity": "high",
+            "location": "src-tauri/src/lib.rs"
+        },
+        {
+            "title": "Velix git push executes repository-configured credential helpers without sandboxing, enabling arbitrary command execution.",
+            "status": "active",
+            "commit_hash": "7640c1aea8a7cb3a406e384e37d9af70ec64ed0a",
+            "detected_at_pst": "2026-07-02T10:03:51-07:00",
+            "reported_link": "",
+            "severity": "high",
+            "location": "src-tauri/src/lib.rs"
+        },
+        {
+            "title": "Swarm launches Gemini, Codex, and Copilot workers with permission-bypass flags that disable CLI tool approval gates.",
+            "status": "active",
+            "commit_hash": "7640c1aea8a7cb3a406e384e37d9af70ec64ed0a",
+            "detected_at_pst": "2026-07-02T10:03:51-07:00",
+            "reported_link": "",
+            "severity": "high",
+            "location": "src/services/swarm/AgentManager.ts"
+        },
+        {
+            "title": "Velix get_git_status runs git status without fsmonitor sandboxing, enabling arbitrary command execution from repository core.fsmonitor configuration.",
+            "status": "active",
+            "commit_hash": "7640c1aea8a7cb3a406e384e37d9af70ec64ed0a",
+            "detected_at_pst": "2026-07-06T10:05:38-07:00",
+            "reported_link": "",
+            "severity": "high",
+            "location": "src-tauri/src/lib.rs"
+        },
+        {
+            "title": "Velix git fetch and pull execute repository-configured core.sshCommand without sandboxing, enabling arbitrary command execution when contacting SSH remotes.",
+            "status": "active",
+            "commit_hash": "7640c1aea8a7cb3a406e384e37d9af70ec64ed0a",
+            "detected_at_pst": "2026-07-08T10:08:00-07:00",
+            "reported_link": "",
+            "severity": "high",
+            "location": "src-tauri/src/lib.rs"
+        },
+        {
+            "title": "Velix git fetch executes ext:: transport URLs when repository config enables protocol.ext.allow, enabling arbitrary command execution.",
+            "status": "active",
+            "commit_hash": "7640c1aea8a7cb3a406e384e37d9af70ec64ed0a",
+            "detected_at_pst": "2026-07-08T10:08:00-07:00",
+            "reported_link": "",
+            "severity": "high",
+            "location": "src-tauri/src/lib.rs"
+        },
+        {
+            "title": "Velix git fetch and pull execute repository-configured core.askpass helpers without sandboxing, enabling arbitrary command execution when authentication is required.",
+            "status": "active",
+            "commit_hash": "7640c1aea8a7cb3a406e384e37d9af70ec64ed0a",
+            "detected_at_pst": "2026-07-08T10:08:00-07:00",
+            "reported_link": "",
+            "severity": "high",
+            "location": "src-tauri/src/lib.rs"
+        },
+        {
+            "title": "Velix git push executes ext:: transport URLs when repository config enables protocol.ext.allow, enabling arbitrary command execution.",
+            "status": "active",
+            "commit_hash": "7640c1aea8a7cb3a406e384e37d9af70ec64ed0a",
+            "detected_at_pst": "2026-07-09T10:20:29-07:00",
+            "reported_link": "",
+            "severity": "high",
+            "location": "src-tauri/src/lib.rs"
+        },
+        {
+            "title": "Velix git push executes repository-configured core.sshCommand without sandboxing, enabling arbitrary command execution when contacting SSH remotes.",
+            "status": "active",
+            "commit_hash": "7640c1aea8a7cb3a406e384e37d9af70ec64ed0a",
+            "detected_at_pst": "2026-07-09T10:20:29-07:00",
+            "reported_link": "",
+            "severity": "high",
+            "location": "src-tauri/src/lib.rs"
+        },
+        {
+            "title": "Velix git pull executes ext:: transport URLs when repository config enables protocol.ext.allow, enabling arbitrary command execution.",
+            "status": "active",
+            "commit_hash": "7640c1aea8a7cb3a406e384e37d9af70ec64ed0a",
+            "detected_at_pst": "2026-07-12T10:05:22-07:00",
+            "reported_link": "",
+            "severity": "high",
+            "location": "src-tauri/src/lib.rs"
+        },
+        {
+            "title": "Project file search follows repository symlinks and reads out-of-project files into Search panel results.",
+            "status": "active",
+            "commit_hash": "7640c1aea8a7cb3a406e384e37d9af70ec64ed0a",
+            "detected_at_pst": "2026-07-12T10:05:22-07:00",
+            "reported_link": "",
+            "severity": "medium",
+            "location": "src-tauri/src/lib.rs"
+        },
+        {
+            "title": "Swarm worker spawn feeds prompt files through double-quoted $(cat ...) command substitution, letting attacker-controlled assignment tasks break out and execute arbitrary shell commands.",
+            "status": "active",
+            "commit_hash": "7640c1aea8a7cb3a406e384e37d9af70ec64ed0a",
+            "detected_at_pst": "2026-07-14T10:06:26-07:00",
+            "reported_link": "",
+            "severity": "high",
+            "location": "src/services/swarm/AgentManager.ts"
+        },
+        {
+            "title": "Tool Panel project analysis follows repository symlinks during directory scans and uploads the resolved out-of-project file contents to external AI providers.",
+            "status": "active",
+            "commit_hash": "7640c1aea8a7cb3a406e384e37d9af70ec64ed0a",
+            "detected_at_pst": "2026-07-14T10:06:26-07:00",
+            "reported_link": "",
+            "severity": "medium",
+            "location": "src/services/analysis/CodeAnalysisService.ts"
+        },
+        {
+            "title": "Velix ai_chat sends Gemini API keys in the request URL query string, exposing secrets to proxies and log sinks.",
+            "status": "active",
+            "commit_hash": "7640c1aea8a7cb3a406e384e37d9af70ec64ed0a",
+            "detected_at_pst": "2026-07-16T10:00:29-07:00",
+            "reported_link": "",
+            "severity": "medium",
+            "location": "src-tauri/src/lib.rs"
+        },
+        {
+            "title": "Velix persists all provider API keys as plaintext JSON in the application config settings file on disk.",
+            "status": "active",
+            "commit_hash": "7640c1aea8a7cb3a406e384e37d9af70ec64ed0a",
+            "detected_at_pst": "2026-07-16T10:00:29-07:00",
+            "reported_link": "",
+            "severity": "medium",
+            "location": "src-tauri/src/lib.rs"
+        },
+        {
+            "title": "Swarm SafetyLimiter path and command guardrails are never invoked during agent execution, leaving forbidden-path and forbidden-command controls inert.",
+            "status": "active",
+            "commit_hash": "7640c1aea8a7cb3a406e384e37d9af70ec64ed0a",
+            "detected_at_pst": "2026-07-18T10:00:01-07:00",
+            "reported_link": "",
+            "severity": "high",
+            "location": "src/services/swarm/OrchestratorCore.ts"
+        },
+        {
+            "title": "Swarm Dry Run mode is stored in configuration but never checked before spawning agents or running validation, so runs still mutate the repository.",
+            "status": "active",
+            "commit_hash": "7640c1aea8a7cb3a406e384e37d9af70ec64ed0a",
+            "detected_at_pst": "2026-07-18T10:00:01-07:00",
+            "reported_link": "",
+            "severity": "medium",
+            "location": "src/services/swarm/OrchestratorCore.ts"
+        },
+        {
+            "title": "Swarm post-task validation automatically runs npx tsc in the repository without user confirmation, enabling arbitrary code execution via trojan TypeScript binaries.",
+            "status": "active",
+            "commit_hash": "7640c1aea8a7cb3a406e384e37d9af70ec64ed0a",
+            "detected_at_pst": "2026-07-23T10:01:11-07:00",
+            "reported_link": "",
+            "severity": "high",
+            "location": "src/services/swarm/SupervisorValidator.ts"
+        },
+        {
+            "title": "Velix git push upstream setup passes the current branch name to git push without a -- separator, so attacker-controlled branch names like --force are parsed as git options.",
+            "status": "active",
+            "commit_hash": "7640c1aea8a7cb3a406e384e37d9af70ec64ed0a",
+            "detected_at_pst": "2026-07-23T10:01:11-07:00",
+            "reported_link": "",
+            "severity": "medium",
+            "location": "src-tauri/src/lib.rs"
+        },
+        {
+            "title": "Terminal yarn/pnpm Tab-autocomplete hardcodes dev script execution, enabling trojan package.json scripts after Tab+Enter.",
+            "status": "active",
+            "commit_hash": "7640c1aea8a7cb3a406e384e37d9af70ec64ed0a",
+            "detected_at_pst": "2026-07-25T10:03:00-07:00",
+            "reported_link": "",
+            "severity": "high",
+            "location": "src/components/TerminalBlock.tsx"
+        },
+        {
+            "title": "AutomationPanel dispatch and broadcast build shell commands with breakable single-quote escaping, enabling arbitrary command execution from crafted automation goals or subtask prompts.",
+            "status": "active",
+            "commit_hash": "7640c1aea8a7cb3a406e384e37d9af70ec64ed0a",
+            "detected_at_pst": "2026-07-25T10:03:00-07:00",
+            "reported_link": "",
+            "severity": "high",
+            "location": "src/components/AutomationPanel.tsx"
+        },
+        {
+            "title": "Terminal git Tab-autocomplete steers users into git commit/checkout commands that execute unsandboxed repository hooks configured via core.hooksPath or .git/hooks.",
+            "status": "active",
+            "commit_hash": "7640c1aea8a7cb3a406e384e37d9af70ec64ed0a",
+            "detected_at_pst": "2026-07-26T10:06:37-07:00",
+            "reported_link": "",
+            "severity": "high",
+            "location": "src/components/TerminalBlock.tsx"
+        },
+        {
+            "title": "Terminal npm/yarn/pnpm Tab-autocomplete runs package managers without neutralizing repository .npmrc script-shell/node-options or .yarnrc.yml yarnPath hijacks, enabling arbitrary command execution even when package.json scripts are benign.",
+            "status": "active",
+            "commit_hash": "7640c1aea8a7cb3a406e384e37d9af70ec64ed0a",
+            "detected_at_pst": "2026-07-26T10:06:37-07:00",
+            "reported_link": "",
+            "severity": "high",
+            "location": "src/components/TerminalBlock.tsx"
+        },
+        {
+            "title": "Terminal cargo Tab-autocomplete runs cargo build/run without neutralizing repository .cargo/config.toml rustc-wrapper or target runner hijacks, enabling arbitrary command execution.",
+            "status": "active",
+            "commit_hash": "7640c1aea8a7cb3a406e384e37d9af70ec64ed0a",
+            "detected_at_pst": "2026-07-27T10:08:27-07:00",
+            "reported_link": "",
+            "severity": "high",
+            "location": "src/components/TerminalBlock.tsx"
+        },
+        {
+            "title": "Terminal git log/branch Tab-autocomplete executes git through a PTY without disabling repository core.pager, enabling arbitrary command execution.",
+            "status": "active",
+            "commit_hash": "7640c1aea8a7cb3a406e384e37d9af70ec64ed0a",
+            "detected_at_pst": "2026-07-27T10:08:27-07:00",
+            "reported_link": "",
+            "severity": "high",
+            "location": "src/components/TerminalBlock.tsx"
+        },
+        {
+            "title": "Terminal git diff Tab-autocomplete executes git through a PTY without disabling repository-configured external diff drivers, enabling arbitrary command execution.",
+            "status": "active",
+            "commit_hash": "7640c1aea8a7cb3a406e384e37d9af70ec64ed0a",
+            "detected_at_pst": "2026-07-28T10:03:05-07:00",
+            "reported_link": "",
+            "severity": "high",
+            "location": "src/components/TerminalBlock.tsx"
+        },
+        {
+            "title": "WorkspaceService scans follow repository symlinks via get_all_files and load symlinked out-of-project file contents into AI prompts sent to external providers.",
+            "status": "active",
+            "commit_hash": "7640c1aea8a7cb3a406e384e37d9af70ec64ed0a",
+            "detected_at_pst": "2026-07-28T10:03:05-07:00",
+            "reported_link": "",
+            "severity": "medium",
+            "location": "src/services/workspace/WorkspaceService.ts"
+        },
+        {
+            "title": "Terminal git fetch Tab-autocomplete executes git fetch through a PTY without sandboxing repository-configured credential helpers, ext:: transports, core.sshCommand, or core.askpass.",
+            "status": "active",
+            "commit_hash": "7640c1aea8a7cb3a406e384e37d9af70ec64ed0a",
+            "detected_at_pst": "2026-07-28T10:03:05-07:00",
+            "reported_link": "",
+            "severity": "high",
+            "location": "src/components/TerminalBlock.tsx"
+        },
+        {
+            "title": "Swarm automation auto-approves npm/yarn/pnpm install, build, and test worker confirmation prompts, enabling execution of malicious repository package scripts without user confirmation.",
+            "status": "active",
+            "commit_hash": "7640c1aea8a7cb3a406e384e37d9af70ec64ed0a",
+            "detected_at_pst": "2026-07-29T10:03:41-07:00",
+            "reported_link": "",
+            "severity": "high",
+            "location": "src/services/swarm/automationPatterns.ts"
+        },
+        {
+            "title": "Terminal git pull, push, and merge Tab-autocomplete execute git through a PTY without sandboxing repository-configured credential helpers, merge drivers, hooks, ext:: transports, core.sshCommand, or core.askpass.",
+            "status": "active",
+            "commit_hash": "7640c1aea8a7cb3a406e384e37d9af70ec64ed0a",
+            "detected_at_pst": "2026-07-29T10:03:41-07:00",
+            "reported_link": "",
+            "severity": "high",
+            "location": "src/components/TerminalBlock.tsx"
+        },
+        {
+            "title": "Terminal Tab-autocomplete maps partial input `re` to `git rebase` and executes it through a PTY without sandboxing repository rebase hooks.",
+            "status": "active",
+            "commit_hash": "7640c1aea8a7cb3a406e384e37d9af70ec64ed0a",
+            "detected_at_pst": "2026-07-31T10:11:00-07:00",
+            "reported_link": "",
+            "severity": "high",
+            "location": "src/components/TerminalBlock.tsx"
+        },
+        {
+            "title": "Swarm post-task validation runs npm/yarn through execute_shell_command without neutralizing repository .npmrc script-shell/node-options or .yarnrc.yml yarnPath hijacks, enabling arbitrary command execution even when package.json scripts are benign.",
+            "status": "active",
+            "commit_hash": "7640c1aea8a7cb3a406e384e37d9af70ec64ed0a",
+            "detected_at_pst": "2026-08-07T10:15:20-07:00",
+            "reported_link": "",
+            "severity": "high",
+            "location": "src/services/swarm/SupervisorValidator.ts"
+        },
+        {
+            "title": "Terminal npm install Tab-autocomplete completes partial install commands and runs npm install, executing attacker-controlled package lifecycle scripts after Tab+Enter.",
+            "status": "active",
+            "commit_hash": "7640c1aea8a7cb3a406e384e37d9af70ec64ed0a",
+            "detected_at_pst": "2026-08-15T10:04:40-07:00",
+            "reported_link": "",
+            "severity": "high",
+            "location": "src/components/TerminalBlock.tsx"
+        },
+        {
+            "title": "Terminal git clone Tab-autocomplete steers users into git clone executed through a PTY without sandboxing credential helpers, smudge/clean filters, or ext:: transport handlers.",
+            "status": "active",
+            "commit_hash": "7640c1aea8a7cb3a406e384e37d9af70ec64ed0a",
+            "detected_at_pst": "2026-08-15T10:04:40-07:00",
+            "reported_link": "",
+            "severity": "high",
+            "location": "src/components/TerminalBlock.tsx"
+        },
+        {
+            "title": "Velix get_git_remote_info treats any origin URL containing a github.com substring as a GitHub repository, hiding the real remote and displaying false GitHub branding that misleads users into push/pull against an attacker host.",
+            "status": "active",
+            "commit_hash": "7640c1aea8a7cb3a406e384e37d9af70ec64ed0a",
+            "detected_at_pst": "2026-08-18T10:20:52-07:00",
+            "reported_link": "",
+            "severity": "medium",
+            "location": "src-tauri/src/lib.rs"
+        }
+    ]
+}
