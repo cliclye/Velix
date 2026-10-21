@@ -56,7 +56,7 @@
   margin: 0;
   font-size: 16px;
   font-weight: 600;
-  font-family: var(--font-mono);
+  font-family: var(--font-sans);
   letter-spacing: 0.5px;
   color: var(--text-primary);
 }
@@ -72,7 +72,7 @@
   color: var(--text-secondary);
   font-size: 10px;
   font-weight: 700;
-  font-family: var(--font-mono);
+  font-family: var(--font-sans);
   letter-spacing: 0.12em;
 }
 
@@ -117,7 +117,7 @@
   border-radius: 8px;
   color: var(--text-muted);
   font-size: 13px;
-  font-family: var(--font-mono);
+  font-family: var(--font-sans);
   text-align: left;
   cursor: pointer;
   transition: all 0.2s ease;
@@ -194,7 +194,7 @@
 .provider-name {
   font-size: 14px;
   font-weight: 600;
-  font-family: var(--font-mono);
+  font-family: var(--font-sans);
   color: var(--text-primary);
 }
 
@@ -209,7 +209,7 @@
   color: white;
   font-size: 10px;
   font-weight: 700;
-  font-family: var(--font-mono);
+  font-family: var(--font-sans);
   padding: 4px 10px;
   border-radius: 6px;
   text-transform: uppercase;
@@ -221,7 +221,7 @@
   color: white;
   font-size: 9px;
   font-weight: 700;
-  font-family: var(--font-mono);
+  font-family: var(--font-sans);
   padding: 3px 8px;
   border-radius: 6px;
   text-transform: uppercase;
@@ -232,7 +232,7 @@
 .provider-description {
   font-size: 11px;
   color: var(--text-hint);
-  font-family: var(--font-mono);
+  font-family: var(--font-sans);
   margin: -4px 0 10px;
   line-height: 1.5;
 }
@@ -253,7 +253,7 @@
 .input-group label {
   font-size: 10px;
   font-weight: 700;
-  font-family: var(--font-mono);
+  font-family: var(--font-sans);
   text-transform: uppercase;
   letter-spacing: 1px;
   color: var(--text-muted);
@@ -273,7 +273,7 @@
   padding: 10px 14px;
   font-size: 13px;
   color: var(--text-primary);
-  font-family: var(--font-mono);
+  font-family: var(--font-sans);
   transition: all 0.2s ease;
 }
 
@@ -329,7 +329,7 @@
   margin: 0 0 8px;
   font-size: 11px;
   font-weight: 700;
-  font-family: var(--font-mono);
+  font-family: var(--font-sans);
   letter-spacing: 0.14em;
   text-transform: uppercase;
   color: var(--text-secondary);
@@ -338,7 +338,7 @@
 .about-tab h3 {
   font-size: 24px;
   font-weight: 700;
-  font-family: var(--font-mono);
+  font-family: var(--font-sans);
   color: var(--text-primary);
   margin: 0 0 12px;
 }
@@ -352,7 +352,7 @@
 .about-tab .version {
   margin-top: 16px;
   font-size: 12px;
-  font-family: var(--font-mono);
+  font-family: var(--font-sans);
   color: var(--text-hint);
 }
 
@@ -393,7 +393,7 @@
   margin: 0 0 16px;
   font-size: 12px;
   font-weight: 700;
-  font-family: var(--font-mono);
+  font-family: var(--font-sans);
   text-transform: uppercase;
   letter-spacing: 1px;
   color: var(--text-muted);
@@ -452,7 +452,7 @@
 .theme-label {
   font-size: 13px;
   font-weight: 600;
-  font-family: var(--font-mono);
+  font-family: var(--font-sans);
   color: var(--text-secondary);
   transition: color 0.2s ease;
 }
@@ -474,7 +474,7 @@
   border: none;
   cursor: pointer;
   font-size: 11px;
-  font-family: var(--font-mono);
+  font-family: var(--font-sans);
   color: var(--accent-primary);
   padding: 0;
   text-decoration: underline;
@@ -532,7 +532,7 @@
 .model-hint {
   font-size: 11px;
   color: var(--text-hint);
-  font-family: var(--font-mono);
+  font-family: var(--font-sans);
   font-style: italic;
   margin: 0;
 }
@@ -695,7 +695,7 @@
   font-size: 12px;
   font-weight: 600;
   color: var(--text-primary);
-  font-family: var(--font-mono);
+  font-family: var(--font-sans);
 }
 
 .cli-row-command {
@@ -720,7 +720,7 @@
   padding: 3px 8px;
   border-radius: 6px;
   letter-spacing: 0.03em;
-  font-family: var(--font-mono);
+  font-family: var(--font-sans);
 }
 
 .cli-row-badge.builtin {
@@ -737,7 +737,7 @@
   background: transparent;
   color: var(--accent-red);
   cursor: pointer;
-  font-family: var(--font-mono);
+  font-family: var(--font-sans);
   transition: all 0.15s ease;
 }
 
@@ -757,7 +757,7 @@
   font-size: 12px;
   font-weight: 600;
   color: var(--text-primary);
-  font-family: var(--font-mono);
+  font-family: var(--font-sans);
 }
 
 .cli-add-inputs {
@@ -795,7 +795,7 @@
   color: var(--btn-primary-fg);
   font-size: 12px;
   font-weight: 600;
-  font-family: var(--font-mono);
+  font-family: var(--font-sans);
   cursor: pointer;
   transition: filter 0.15s ease;
   flex-shrink: 0;

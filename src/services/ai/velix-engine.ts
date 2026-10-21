@@ -1,26 +1,18 @@
 /**
- * VelixEngine - Direct AI provider client via Electron IPC.
+ * VelixEngine - Direct AI provider client via Tauri IPC.
  *
- * Handles all AI provider calls from the Electron main process
- * (which has no CORS restrictions).
+ * All provider calls go through the Rust backend (no CORS restrictions).
  */
 
 import { invoke } from '../../platform/native';
 
-/** Velix model ID → actual provider model ID overrides (only where they differ) */
-const MODEL_ID_MAP: Record<string, string> = {
-  // Anthropic — map to full dated IDs
-  'claude-opus-4-6': 'claude-opus-4-6-20250527',
-  'claude-haiku-4-5': 'claude-haiku-4-5-20251001',
-  // Google models
-  'gemini-2.5-pro': 'gemini-2.5-pro-preview-06-05',
-  'gemini-2.0-flash': 'gemini-2.0-flash-001',
-};
-
 export class VelixEngine {
-  /** Map Velix model ID to actual provider model ID */
+  /**
+   * Model ids are sent to the provider exactly as selected. (An earlier alias table rewrote
+   * some ids to dated/preview names that may no longer exist, which risks 404s for those models.)
+   */
   toActualModelID(velixModelID: string): string {
-    return MODEL_ID_MAP[velixModelID] ?? velixModelID;
+    return velixModelID;
   }
 
   /** No external server — always ready */

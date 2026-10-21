@@ -1,47 +1,39 @@
 /**
- * Swarm — multi-agent orchestration for worker CLIs
- * Barrel exports for the swarm module
+ * Swarm — multi-agent orchestration for headless worker CLIs.
  */
 
-// Types
 export * from './types';
 
-// Core components
-export { OrchestratorCore, orchestrator } from './OrchestratorCore';
+export { AgentManager, DEFAULT_AGENT_TIMEOUT_MS, MAX_MODE_AGENT_TIMEOUT_MS, tauriAgentTransport } from './AgentManager';
+export type { AgentRunResult, AgentTransport, AgentRunnerEvent, RunTaskOptions } from './AgentManager';
+
 export {
-  AgentManager,
   WORKER_CLI_OPTIONS,
   getWorkerCLIOptions,
-  buildHeadlessCommand,
   loadCustomCLIOptions,
   saveCustomCLIOptions,
   detectWorkerCLIAvailability,
-  DEFAULT_AGENT_TIMEOUT_MS,
-  MAX_MODE_AGENT_TIMEOUT_MS,
-} from './AgentManager';
-export type { WorkerCLIOption, AgentRunResult } from './AgentManager';
-export { SwarmRunner } from './SwarmRunner';
-export type { SwarmRunnerCallbacks, SwarmRunOptions, SwarmRunOutcome, SwarmLogKind } from './SwarmRunner';
-export { SwarmEventEmitter, swarmEvents } from './SwarmEventEmitter';
+  buildWorkerInvocation,
+  createStreamParser,
+  splitCommand,
+} from './workerCli';
+export type { WorkerCLIOption, WorkerCLIStatus, WorkerInvocation, ActivityEntry } from './workerCli';
 
-// Role system
-export { RoleSystem } from './RoleSystem';
+export { SwarmRunner, mapWithConcurrency, isAbortError, DEFAULT_CONCURRENCY } from './SwarmRunner';
+export type { SwarmRunnerCallbacks, SwarmRunOptions, SwarmRunOutcome, SwarmLogKind, SwarmPhase, SwarmFinalVerdict, WorkerPool } from './SwarmRunner';
+
+export { SwarmSession, swarmSession, isRunActive } from './SwarmSession';
+export type { SwarmSnapshot, SwarmStartConfig, SwarmLogEntry } from './SwarmSession';
+
 export { AGENT_ROLES, getRole, getRolesByPriority, getRoleName, getRoleColor } from './roleDefinitions';
 export { claudeCoordinator, SWARM_SPECIALIST_ROLE_ORDER } from './ClaudeCoordinator';
-export {
-  extractStructuredHandoff,
-  formatCoordinatorHandoff,
-  getAgentHandoffText,
-  getAgentSyncHandoffText,
-  getRawAgentOutput,
-  verifyHandoffExtraction,
-} from './handoffOutput';
+export type { CoordinatorConfig, CoordinatorPlan, CoordinatorAssignment } from './ClaudeCoordinator';
 
-// Automation
-export { AutomationRulesEngine } from './AutomationRulesEngine';
-export { DEFAULT_AUTOMATION_PATTERNS, DEFAULT_POLICIES, RESPONSE_TEMPLATES } from './automationPatterns';
-
-// Context and coordination
-export { SharedContextLayer } from './SharedContextLayer';
-export { SupervisorValidator } from './SupervisorValidator';
-export { SafetyLimiter } from './SafetyLimiter';
+export { extractStructuredHandoff, formatCoordinatorHandoff, parseReviewVerdict } from './handoffOutput';
+export { SWARM_PRESETS, getSwarmPreset } from './presets';
+export type { SwarmPreset, SwarmRoleCounts } from './presets';
+export { loadSwarmHistory, saveSwarmRun, clearSwarmHistory } from './history';
+export type { SwarmHistoryEntry } from './history';
+export { buildReportMarkdown, captureGitSnapshot, diffSnapshots, formatDuration } from './report';
+export type { ChangedFile } from './report';
+export { requestSwarmPreset, takePendingSwarmPreset, onSwarmPresetRequest } from './presetBus';

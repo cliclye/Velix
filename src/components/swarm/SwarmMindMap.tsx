@@ -38,25 +38,25 @@ interface SwarmMindMapProps {
 }
 
 const TONE_COLORS: Record<NodeTone, string> = {
-  queued: '#a3a3a3',
-  mapping: '#eab308',
-  building: '#22c55e',
-  review: '#3b82f6',
-  done: '#16a34a',
-  blocked: '#ef4444',
+  queued: '#9c978c',
+  mapping: '#3b6d8f',
+  building: '#2e6b63',
+  review: '#b9692f',
+  done: '#3f7d4e',
+  blocked: '#b2453a',
 };
 
 const ROLE_COLORS: Record<string, string> = {
-  scout: 'var(--text-muted)',
-  builder: 'var(--text-primary)',
-  reviewer: 'var(--text-secondary)',
+  scout: 'var(--info)',
+  builder: 'var(--accent-primary)',
+  reviewer: 'var(--accent-orange)',
 };
 
 const MIN_ZOOM = 0.4;
 const MAX_ZOOM = 2.2;
 const DRAG_THRESHOLD = 4;
 const COORDINATOR_WIDTH = 210;
-const COORDINATOR_HEIGHT = 84;
+const COORDINATOR_HEIGHT = 96;
 const NODE_WIDTH = 196;
 const NODE_HEIGHT = 102;
 const NODE_VISIBLE_EDGE_X = 28;
@@ -92,25 +92,6 @@ const clamp = (value: number, min: number, max: number): number =>
 
 const truncateText = (value: string, max: number): string =>
   value.length > max ? `${value.slice(0, max - 1)}…` : value;
-
-export const buildDefaultMindMapPosition = (index: number, total: number): MindMapPosition => {
-  const safeTotal = Math.max(total, 1);
-  const cols = safeTotal <= 3 ? safeTotal : safeTotal <= 8 ? 4 : 5;
-  const rows = Math.ceil(safeTotal / cols);
-  const row = Math.floor(index / cols);
-  const isLastRow = row === rows - 1;
-  const nodesInRow = isLastRow ? safeTotal - row * cols : cols;
-  const col = index - row * cols;
-  const xStep = 0.74 / Math.max(nodesInRow - 1, 1);
-  const x = nodesInRow === 1 ? 0.5 : 0.13 + col * xStep;
-  const yStep = rows === 1 ? 0 : 0.54 / Math.max(rows - 1, 1);
-  const y = 0.28 + row * yStep;
-
-  return {
-    x: clamp(x, 0.05, 0.95),
-    y: clamp(y, 0.20, 0.95),
-  };
-};
 
 const buildCurvePath = (from: CanvasPoint, to: CanvasPoint): string => {
   const horizontalDistance = Math.abs(to.x - from.x);
@@ -280,18 +261,26 @@ export const SwarmMindMap: React.FC<SwarmMindMapProps> = ({
     return () => element.removeEventListener('wheel', handleWheel);
   }, [handleWheel]);
 
-  const resolvedNodes = useMemo<ResolvedMindMapNode[]>(() =>
-    nodes.map((node, index) => {
-      const center = denormalizeCanvasPoint(node.position || buildDefaultMindMapPosition(index, nodes.length));
-      return {
-        ...node,
-        center,
-        roleColor: ROLE_COLORS[node.role] ?? '#6B7280',
-        statusColor: TONE_COLORS[node.tone],
-      };
-    }),
-    [nodes, denormalizeCanvasPoint],
-  );
+  const resolvedNodes = useMemo<ResolvedMindMapNode[]>(() => {
+    // Nodes nobody has dragged yet are laid out in rows BELOW the coordinator card.
+    const firstRowY = coordinatorCenter.y + COORDINATOR_HEIGHT / 2 + NODE_HEIGHT / 2 + 40;
+    const stride = NODE_WIDTH + 28;
+    const cols = Math.max(1, Math.min(nodes.length, Math.floor((size.w - 24) / stride)));
+    const defaultCenter = (index: number): CanvasPoint => {
+      const row = Math.floor(index / cols);
+      const col = index % cols;
+      const inRow = Math.min(cols, nodes.length - row * cols);
+      const span = (inRow - 1) * stride;
+      return { x: size.w / 2 - span / 2 + col * stride, y: firstRowY + row * (NODE_HEIGHT + 32) };
+    };
+
+    return nodes.map((node, index) => ({
+      ...node,
+      center: node.position ? denormalizeCanvasPoint(node.position) : defaultCenter(index),
+      roleColor: ROLE_COLORS[node.role] ?? '#6B7280',
+      statusColor: TONE_COLORS[node.tone],
+    }));
+  }, [nodes, denormalizeCanvasPoint, size.w, coordinatorCenter.y]);
 
   const nodesById = useMemo(() => new Map(resolvedNodes.map((node) => [node.id, node])), [resolvedNodes]);
   const incomingNodeIds = useMemo(() => new Set(connections.map((connection) => connection.to)), [connections]);
