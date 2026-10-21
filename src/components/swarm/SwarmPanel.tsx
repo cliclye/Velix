@@ -2,6 +2,7 @@ import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import {
+  captureGitSnapshot,
   claudeCoordinator,
   detectWorkerCLIAvailability,
   getWorkerCLIOptions,
@@ -48,6 +49,7 @@ export const SwarmPanel: React.FC<SwarmPanelProps> = ({ workspacePath, theme, on
   const [history, setHistory] = useState<SwarmHistoryEntry[]>(() => loadSwarmHistory());
   const [viewing, setViewing] = useState<SwarmHistoryEntry | null>(null);
   const [incomingPreset, setIncomingPreset] = useState<SwarmPreset | null>(null);
+  const [dirtyFileCount, setDirtyFileCount] = useState(0);
 
   const active = isRunActive(snapshot.phase);
   const now = useNow(active || snapshot.agents.some(isLive));
@@ -70,6 +72,14 @@ export const SwarmPanel: React.FC<SwarmPanelProps> = ({ workspacePath, theme, on
       .catch(() => { if (!cancelled) { setHasKey(false); setKeyChecked(true); } });
     return () => { cancelled = true; };
   }, [settings.coordinatorProvider]);
+
+  // Heads-up if the working tree already has uncommitted changes.
+  useEffect(() => {
+    if (!workspacePath || active) return;
+    let cancelled = false;
+    captureGitSnapshot(workspacePath).then((snap) => { if (!cancelled) setDirtyFileCount(snap?.files.length ?? 0); });
+    return () => { cancelled = true; };
+  }, [workspacePath, active, snapshot.historyId]);
 
   // Presets requested from the command palette (possibly before this panel mounted).
   useEffect(() => {
@@ -170,6 +180,8 @@ export const SwarmPanel: React.FC<SwarmPanelProps> = ({ workspacePath, theme, on
         onDismissError={() => setError(null)}
         incomingPreset={incomingPreset}
         onPresetConsumed={() => setIncomingPreset(null)}
+        dirtyFileCount={dirtyFileCount}
+        onOpenGit={onOpenGit}
       />
     );
   }

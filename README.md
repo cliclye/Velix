@@ -1,91 +1,79 @@
 # Velix
 
-> An AI-powered desktop IDE that brings multi-provider AI, a full terminal, and a code editor into one native application.
+> A calm desktop workspace for working with AI coding agents: a real terminal, git and search panels, and **Swarm** — a coordinator that splits a goal across parallel Claude Code / Gemini / Codex workers and reviews the result.
 
-Built with React + TypeScript on the frontend and **Tauri 2** (Rust) for the desktop shell. Designed around a minimal, distraction-free workflow — warm neutrals, deep teal accents, and everything you need in a single window.
-
----
-
-## Features
-
-**Core IDE**
-- Native desktop app — macOS, Windows, Linux via Tauri
-- Full PTY terminal with tabs, split views, and persistent sessions
-- File explorer with tree-view sidebar
-- Syntax-highlighted code editor with configurable tab sizes and theme support
-- Quick file finder — `Cmd/Ctrl+P` to jump anywhere instantly
-- Global search across your entire workspace
-- Light and dark themes with automatic system preference detection
-
-**AI-Powered Development**
-- Multi-provider support — Claude, OpenAI, Gemini, GLM4
-- Full workspace context — AI reads your project structure and files
-- Inline assistance from the terminal — ask, create, edit, refactor
-- Voice chat for hands-free interaction (requires OpenAI API key)
-
-**Multi-Agent Orchestration**
-- Automation panel — run multiple AI agents on complex, multi-step tasks
-- Swarm Mode — coordinator-led coding with scout, builder, and reviewer roles
-  - File ownership lanes to reduce overlap
-  - Real-time coordination board and sync rounds
-  - Review gates before work is considered done
-  - Per-agent terminal views for full visibility
-
-**Git Integration**
-- Git panel — view diffs, stage changes, manage your repo
-- File status indicators (modified, added, deleted)
-- AI-aware git context for smarter suggestions
+Built with React 19 + TypeScript and **Tauri 2** (Rust). Warm paper-and-ink design in light and dark, one deep-teal accent, nothing in the way.
 
 ---
 
-## Getting Started
+## What's in the box
 
-### Prerequisites
+**Terminal workspace**
+- Real PTY terminals (xterm.js) with tabs, split panes (drag to rearrange) and one-click launchers for agent CLIs
+- Ask / edit with an AI model from the prompt bar, with the project as context (multi-provider: Claude, OpenAI, Gemini, GLM, MiniMax, Kimi, DeepSeek, Groq, Mistral)
+- Git panel (status, diffs, branches, pull/push/fetch) and project-wide search
+- Voice chat (needs an OpenAI key)
 
-- [Node.js](https://nodejs.org/) v18+
-- [Rust](https://www.rust-lang.org/tools/install) (required for the Tauri desktop app)
-- An API key from at least one supported AI provider
+**Swarm** — parallel agents with a review gate
+1. You describe the goal (or start from a preset: feature, bug fix, tests, refactor, security audit, docs).
+2. A **coordinator** model plans non-overlapping lanes with file ownership.
+3. **Scouts** map the code, **builders** implement in parallel, **reviewers** inspect the real working tree and return `APPROVED` / `REVISE`.
+4. `REVISE` sends builders back with the reviewers' feedback (up to N rounds).
+5. You get a Markdown **report**: result, duration, cost, files changed (from `git status`), per-worker outcome. Past runs are kept in history.
 
-### Install
+Swarm details that matter:
+- Each worker is one headless CLI process (`claude -p`, `codex exec`, `gemini -p`, …) started directly by the Rust backend — no shell, no quoting, prompt over stdin.
+- Live activity per worker (tool calls, edited files) for Claude Code via `stream-json`; the others show output as they print it.
+- **Stop** really stops: SIGTERM, then SIGKILL, to the worker's whole process group. Workers are also killed when Velix quits.
+- A run lives outside the UI: close the Swarm tab, switch tabs, keep working — it keeps going, and the activity bar and status bar show it.
+- Bounded parallelism, per-worker hard timeout (20 min, 45 in Max mode), and failed workers are reported instead of silently ignored.
+
+**Everywhere**
+- `⌘/Ctrl + K` command palette, `⌘/Ctrl + /` shortcut sheet
+- Light and dark themes (follows the system until you choose)
+
+---
+
+## Requirements
+
+- [Node.js](https://nodejs.org/) 18+
+- [Rust](https://www.rust-lang.org/tools/install) (stable) and the [Tauri 2 prerequisites](https://tauri.app/start/prerequisites/) for your OS
+- For Swarm: at least one worker CLI installed and logged in (e.g. [Claude Code](https://docs.anthropic.com/claude-code)), plus an API key for the **coordinator** model in Settings
+
+## Run
 
 ```bash
-git clone https://github.com/your-username/velix.git
+git clone https://github.com/cliclye/velix.git
 cd velix
 npm install
-```
-
-### Run
-
-```bash
 npm run tauri dev
 ```
 
-### Build
-
 ```bash
-# Frontend only (e.g. static check)
-npm run build
-
-# Tauri desktop bundle
-npm run tauri build
+npm run build          # type-check + frontend build
+npm run tauri build    # desktop bundle
 ```
 
 ### Configure
 
-1. Open Velix and go to **Settings** in the sidebar
-2. Add your API key(s) for the AI provider(s) you want
-3. Select a model
-4. Open a project folder — the AI will index it automatically
+1. Open **Settings** and add an API key for the provider you want the coordinator/chat to use.
+2. Open a project folder (top-left).
+3. Open **Swarm**, pick a preset or describe a goal, and launch.
+
+Claude Code workers use their own login by default. Tick *Use my saved Anthropic key for Claude Code* under **Options** to pass your saved key instead.
 
 ---
 
-## Keyboard Shortcuts
+## Keyboard shortcuts
 
 | Shortcut | Action |
 |---|---|
-| `Cmd/Ctrl + P` | Quick file finder |
-| `Cmd/Ctrl + D` | New terminal tab |
-| `Cmd/Ctrl + W` | Close current terminal tab |
+| `⌘/Ctrl + K` | Command palette |
+| `⌘/Ctrl + /` | Keyboard shortcuts |
+| `⌘/Ctrl + ,` | Settings |
+| `⌘/Ctrl + D` | Split the terminal pane |
+| `⌘/Ctrl + W` | Close pane or tab |
+| `⌘/Ctrl + Enter` | Launch the swarm (goal box focused) |
 
 ---
 
@@ -93,44 +81,40 @@ npm run tauri build
 
 ```
 velix/
-├── src/                  # React 19 + TypeScript frontend
-│   ├── components/       # UI components (editor, terminal, panels, AI chat)
-│   ├── services/         # AI, workspace, audio, and git services
-│   ├── styles/           # Component and global styles
-│   └── App.tsx           # Root application
-├── src-tauri/            # Rust backend (Tauri 2)
-│   └── src/              # Tauri commands, PTY, native integrations
-└── public/               # Static assets
+├── src/                      React + TypeScript frontend
+│   ├── components/           Terminal, panels, settings, command palette
+│   │   └── swarm/            Composer, board, graph, report, agent drawer
+│   ├── services/
+│   │   ├── ai/               Provider clients (via the Rust backend)
+│   │   └── swarm/            Engine: runner, session store, coordinator, CLI adapters
+│   └── App.tsx
+└── src-tauri/src/
+    ├── lib.rs                Tauri commands: PTY, git, search, AI proxy, settings
+    └── agent.rs              Swarm worker process runner (spawn, stream, kill, timeout)
 ```
 
----
+Swarm data flow: `SwarmSession` (store, outside React) → `SwarmRunner` (scouts → builders ⇄ reviewers) → `AgentManager` → Tauri `agent_spawn` → `agent.rs` → CLI process; `agent-event` (output / exit) flows back the same way.
 
-## Tech Stack
+## Tests
+
+```bash
+npm test               # vitest: engine, runner, session store, parsing (75 tests)
+npm run test:rust      # cargo test: process runner incl. process-tree kill (13 tests)
+npm run typecheck
+```
+
+The swarm tests run the real `SwarmSession`/`SwarmRunner`/`AgentManager` against a fake process transport; the Rust tests run real child processes (stdin, timeouts, SIGTERM-ignoring workers, grandchildren, multibyte output).
+
+## Tech stack
 
 | Layer | Technology |
 |---|---|
 | Frontend | React 19, TypeScript, Vite |
 | Desktop | Tauri 2 (Rust) |
-| Terminal | xterm.js + PTY via Tauri (`portable-pty` in Rust) |
-| AI Engine | Custom multi-provider agent |
-| Styling | CSS custom properties, JetBrains Mono, Inter |
-
----
-
-## Development Setup
-
-Recommended: [VS Code](https://code.visualstudio.com/) with these extensions:
-- [Tauri](https://marketplace.visualstudio.com/items?itemName=tauri-apps.tauri-vscode)
-- [rust-analyzer](https://marketplace.visualstudio.com/items?itemName=rust-lang.rust-analyzer)
-
----
-
-## Star History
-
-[![Star History Chart](https://api.star-history.com/svg?repos=Changhyung2010/Velix&type=Date)](https://www.star-history.com/#Changhyung2010/Velix&Date)
-
----
+| Terminal | xterm.js + `portable-pty` |
+| Swarm workers | Direct child processes (`std::process`) with process-group control |
+| Styling | CSS custom properties; Newsreader, Inter, JetBrains Mono |
 
 ## License
 
-See [LICENSE](LICENSE) for details.
+See [LICENSE](LICENSE).

@@ -30,6 +30,9 @@ interface SwarmComposerProps {
   /** A preset requested from outside (command palette); applied once, then consumed. */
   incomingPreset: SwarmPreset | null;
   onPresetConsumed: () => void;
+  /** Uncommitted files already in the working tree (workers will edit alongside them). */
+  dirtyFileCount: number;
+  onOpenGit?: () => void;
 }
 
 const VERDICT_LABEL: Record<SwarmHistoryEntry['verdict'], { text: string; tone: string }> = {
@@ -43,7 +46,7 @@ const VERDICT_LABEL: Record<SwarmHistoryEntry['verdict'], { text: string; tone: 
 export const SwarmComposer: React.FC<SwarmComposerProps> = ({
   goal, onGoalChange, settings, onSettingsChange, cliStatus, isCheckingCLI, onRecheckCLI,
   hasCoordinatorKey, keyChecked, onOpenSettings, history, onOpenHistory, onLaunch, workspaceName,
-  error, onDismissError, incomingPreset, onPresetConsumed,
+  error, onDismissError, incomingPreset, onPresetConsumed, dirtyFileCount, onOpenGit,
 }) => {
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const cliOptions = getWorkerCLIOptions();
@@ -158,6 +161,14 @@ export const SwarmComposer: React.FC<SwarmComposerProps> = ({
           <div className="sw-notice warn" role="status">
             <span>{blocker.text}</span>
             {blocker.action && <button type="button" className="sw-link" onClick={blocker.action.run}>{blocker.action.label}</button>}
+          </div>
+        )}
+        {dirtyFileCount > 0 && (
+          <div className="sw-notice" role="note">
+            <span>
+              {dirtyFileCount} uncommitted file{dirtyFileCount === 1 ? '' : 's'} in this project. Workers edit the same working tree, so consider committing or stashing first.
+            </span>
+            {onOpenGit && <button type="button" className="sw-link" onClick={onOpenGit}>Open Git</button>}
           </div>
         )}
         {error && (

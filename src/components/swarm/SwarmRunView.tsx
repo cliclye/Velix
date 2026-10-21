@@ -60,6 +60,8 @@ export const SwarmRunView: React.FC<SwarmRunViewProps> = ({
   const doneCount = [...latest.values()].filter((a) => a.status === 'completed').length;
   const startedAt = snapshot.startedAt ?? now;
   const elapsed = formatElapsed((snapshot.finishedAt ?? now) - startedAt);
+  const totalCost = snapshot.agents.reduce((sum, a) => sum + (a.costUsd ?? 0), 0);
+  const costText = totalCost > 0 ? ` · $${totalCost.toFixed(2)}` : '';
   const openAgent = openKey ? latest.get(openKey) : undefined;
 
   const nodes = useMemo<MindMapNode[]>(() => assignments.map((a) => {
@@ -136,8 +138,8 @@ export const SwarmRunView: React.FC<SwarmRunViewProps> = ({
           })}
           <li className="sw-steps-meta">
             {active
-              ? <>{snapshot.label}{snapshot.iteration > 1 ? ` · round ${snapshot.iteration}` : ''} · {runningCount} active · {elapsed}</>
-              : <>{doneCount}/{latest.size} workers done · {elapsed}</>}
+              ? <>{snapshot.label}{snapshot.iteration > 1 ? ` · round ${snapshot.iteration}` : ''} · {runningCount} active · {elapsed}{costText}</>
+              : <>{doneCount}/{latest.size} workers done · {elapsed}{costText}</>}
           </li>
         </ol>
 

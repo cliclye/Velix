@@ -634,7 +634,9 @@ fn resolve_cli(command: &str) -> Option<String> {
     found
 }
 
-#[tauri::command]
+// `async` runs this off the main thread: the first call probes the login shell, which can
+// take seconds with a heavy ~/.zshrc and must not freeze the UI.
+#[tauri::command(async)]
 fn check_cli_available(command: String) -> Result<String, String> {
     resolve_cli(&command).ok_or_else(|| {
         format!(
@@ -647,7 +649,8 @@ fn check_cli_available(command: String) -> Result<String, String> {
 // ==================== Swarm worker processes ====================
 
 /// Start one headless worker CLI. Output and exit are reported via `agent-event`.
-#[tauri::command]
+/// (`async`: resolving the CLI may probe the login shell; keep that off the main thread.)
+#[tauri::command(async)]
 fn agent_spawn(
     mut request: AgentSpawnRequest,
     app: AppHandle,
