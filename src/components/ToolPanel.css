@@ -256,7 +256,7 @@
     border: 1px solid var(--border-default);
     border-radius: 6px;
     font-size: 12px;
-    font-family: var(--font-mono);
+    font-family: var(--font-sans);
     background: var(--bg-input);
     color: var(--text-primary);
     outline: none;
@@ -422,7 +422,7 @@
 
 .tp-lang-pct {
     color: var(--text-hint);
-    font-family: var(--font-mono);
+    font-family: var(--font-sans);
     font-size: 10px;
 }
 
@@ -476,7 +476,7 @@
 .tp-contrib-count {
     font-size: 11px;
     color: var(--text-hint);
-    font-family: var(--font-mono);
+    font-family: var(--font-sans);
     min-width: 32px;
     text-align: right;
 }
@@ -500,7 +500,7 @@
 }
 
 .tp-branch-name {
-    font-family: var(--font-mono);
+    font-family: var(--font-sans);
     color: var(--text-secondary);
 }
 
@@ -524,7 +524,7 @@
 
 .tp-release-info strong {
     color: var(--text-primary);
-    font-family: var(--font-mono);
+    font-family: var(--font-sans);
     font-size: 12px;
 }
 

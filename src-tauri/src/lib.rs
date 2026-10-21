@@ -1,4 +1,7 @@
-use portable_pty::{native_pty_system, CommandBuilder, PtyPair, PtySize};
+mod agent;
+
+use agent::{AgentEvent, AgentRunner, AgentSpawnRequest, EventSink};
+use portable_pty::{native_pty_system, ChildKiller, CommandBuilder, PtyPair, PtySize};
 use serde::Serialize;
 use std::collections::HashMap;
 use std::fs;
@@ -20,6 +23,16 @@ fn cli_path_cache() -> &'static Mutex<HashMap<String, Result<String, ()>>> {
     CLI_PATH_CACHE.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
+/// rc files may print banners; the PATH we asked for is always the last non-empty line.
+fn last_path_line(output: &str) -> Option<String> {
+    output
+        .lines()
+        .map(|l| l.trim())
+        .filter(|l| !l.is_empty())
+        .last()
+        .map(|l| l.to_string())
+}
+
 /// Build (and cache) the ordered list of directories to scan for binaries.
 fn get_search_dirs() -> Vec<String> {
     SEARCH_DIRS_CACHE
@@ -30,20 +43,21 @@ fn get_search_dirs() -> Vec<String> {
             let login_path = Command::new(&shell)
                 .args(["-l", "-c", "echo $PATH"])
                 .env("HOME", &home)
+                .stdin(std::process::Stdio::null())
                 .output()
                 .ok()
                 .and_then(|o| String::from_utf8(o.stdout).ok())
-                .map(|s| s.trim().to_string())
-                .filter(|s| !s.is_empty());
+                .and_then(|s| last_path_line(&s));
 
+            // Interactive shells source ~/.zshrc, where tools like nvm/bun/pnpm extend PATH.
             let interactive_path = Command::new(&shell)
                 .args(["-i", "-l", "-c", "echo $PATH"])
                 .env("HOME", &home)
+                .stdin(std::process::Stdio::null())
                 .output()
                 .ok()
                 .and_then(|o| String::from_utf8(o.stdout).ok())
-                .map(|s| s.trim().to_string())
-                .filter(|s| !s.is_empty());
+                .and_then(|s| last_path_line(&s));
 
             let mut dirs: Vec<String> = Vec::new();
             for raw in [login_path, interactive_path].into_iter().flatten() {
@@ -110,6 +124,9 @@ struct AppSettings {
 struct PtySession {
     pair: PtyPair,
     writer: Box<dyn IoWrite + Send>,
+    /// Lets `pty_kill` actually terminate the shell (dropping the session alone does not:
+    /// the reader thread keeps a dup of the master fd open, so no SIGHUP is delivered).
+    killer: Box<dyn ChildKiller + Send + Sync>,
 }
 
 // Simple in-memory storage for API keys and shell state
@@ -120,6 +137,8 @@ struct AppState {
     app_dir: Mutex<Option<PathBuf>>,
     /// Handle to the Velix AI engine child process
     velix_engine_process: Mutex<Option<Child>>,
+    /// Swarm worker processes (one headless CLI run each).
+    agents: Arc<AgentRunner>,
 }
 
 impl AppState {
@@ -146,6 +165,7 @@ impl AppState {
             pty_sessions: Mutex::new(HashMap::new()),
             app_dir: Mutex::new(app_dir),
             velix_engine_process: Mutex::new(None),
+            agents: Arc::new(AgentRunner::new()),
         }
     }
 
@@ -242,8 +262,7 @@ fn get_login_shell_path() -> String {
                 .output()
                 .ok()
                 .and_then(|o| String::from_utf8(o.stdout).ok())
-                .map(|s| s.trim().to_string())
-                .filter(|s| !s.is_empty())
+                .and_then(|s| last_path_line(&s))
                 .unwrap_or_else(|| std::env::var("PATH").unwrap_or_default())
         })
         .clone()
@@ -327,7 +346,8 @@ fn pty_create(
         .take_writer()
         .map_err(|e| format!("Failed to take writer: {}", e))?;
 
-    let session = Arc::new(Mutex::new(PtySession { pair, writer }));
+    let killer = child.clone_killer();
+    let session = Arc::new(Mutex::new(PtySession { pair, writer, killer }));
 
     // Store the session — replace any existing session with the same id so reader
     // threads cannot emit duplicate events for a recycled session id.
@@ -434,12 +454,20 @@ fn pty_resize(
 
 #[tauri::command]
 fn pty_kill(session_id: String, state: State<'_, AppState>) -> Result<(), String> {
-    let mut sessions = state.pty_sessions.lock().map_err(|e| e.to_string())?;
+    let removed = {
+        let mut sessions = state.pty_sessions.lock().map_err(|e| e.to_string())?;
+        sessions.remove(&session_id)
+    };
 
-    if sessions.remove(&session_id).is_some() {
-        Ok(())
-    } else {
-        Err(format!("PTY session not found: {}", session_id))
+    match removed {
+        Some(session) => {
+            if let Ok(mut guard) = session.lock() {
+                // Best effort: the process may already be gone.
+                let _ = guard.killer.kill();
+            }
+            Ok(())
+        }
+        None => Err(format!("PTY session not found: {}", session_id)),
     }
 }
 
@@ -557,51 +585,112 @@ fn execute_shell_command(
     })
 }
 
+fn is_executable_file(path: &Path) -> bool {
+    if !path.is_file() {
+        return false;
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::metadata(path)
+            .map(|m| m.permissions().mode() & 0o111 != 0)
+            .unwrap_or(false)
+    }
+    #[cfg(not(unix))]
+    {
+        true
+    }
+}
+
 /// Locate a CLI binary using the user's full login-shell PATH, then fall back
 /// to well-known installation directories (nvm, homebrew, npm-global, cargo).
-/// Results are cached so repeated calls (e.g. reopening the Swarm panel) are instant.
-#[tauri::command]
-fn check_cli_available(command: String) -> Result<String, String> {
-    // Fast path: return cached result if available.
+/// Hits are cached; misses are NOT, so installing a CLI while Velix is open works
+/// without a restart.
+fn resolve_cli(command: &str) -> Option<String> {
+    // Explicit path: just verify it.
+    if command.contains('/') || command.contains('\\') {
+        return is_executable_file(Path::new(command)).then(|| command.to_string());
+    }
+
     if let Ok(cache) = cli_path_cache().lock() {
-        if let Some(cached) = cache.get(&command) {
-            return cached
-                .clone()
-                .map_err(|_| format!("{} not found in login-shell PATH or common install locations", command));
-        }
-    }
-
-    // Slow path (first call only): get ordered search dirs, then scan.
-    let dirs = get_search_dirs();
-    let mut found: Option<String> = None;
-
-    'outer: for dir in &dirs {
-        let candidate = Path::new(dir).join(&command);
-        if candidate.is_file() {
-            #[cfg(unix)]
-            {
-                use std::os::unix::fs::PermissionsExt;
-                if let Ok(meta) = std::fs::metadata(&candidate) {
-                    if meta.permissions().mode() & 0o111 != 0 {
-                        found = Some(candidate.to_string_lossy().to_string());
-                        break 'outer;
-                    }
-                }
-            }
-            #[cfg(not(unix))]
-            {
-                found = Some(candidate.to_string_lossy().to_string());
-                break 'outer;
+        if let Some(Ok(path)) = cache.get(command) {
+            if is_executable_file(Path::new(path)) {
+                return Some(path.clone());
             }
         }
     }
 
-    // Store result in cache (both hits and misses).
-    if let Ok(mut cache) = cli_path_cache().lock() {
-        cache.insert(command.clone(), found.clone().ok_or(()));
-    }
+    let found = get_search_dirs()
+        .iter()
+        .map(|dir| Path::new(dir).join(command))
+        .find(|candidate| is_executable_file(candidate))
+        .map(|p| p.to_string_lossy().to_string());
 
-    found.ok_or_else(|| format!("{} not found in login-shell PATH or common install locations", command))
+    if let Some(path) = &found {
+        if let Ok(mut cache) = cli_path_cache().lock() {
+            cache.insert(command.to_string(), Ok(path.clone()));
+        }
+    }
+    found
+}
+
+// `async` runs this off the main thread: the first call probes the login shell, which can
+// take seconds with a heavy ~/.zshrc and must not freeze the UI.
+#[tauri::command(async)]
+fn check_cli_available(command: String) -> Result<String, String> {
+    resolve_cli(&command).ok_or_else(|| {
+        format!(
+            "{} not found in login-shell PATH or common install locations",
+            command
+        )
+    })
+}
+
+// ==================== Swarm worker processes ====================
+
+/// Start one headless worker CLI. Output and exit are reported via `agent-event`.
+/// (`async`: resolving the CLI may probe the login shell; keep that off the main thread.)
+#[tauri::command(async)]
+fn agent_spawn(
+    mut request: AgentSpawnRequest,
+    app: AppHandle,
+    state: State<'_, AppState>,
+) -> Result<String, String> {
+    let resolved = resolve_cli(&request.program).ok_or_else(|| {
+        format!(
+            "`{}` was not found. Install it or check that it is on your login-shell PATH.",
+            request.program
+        )
+    })?;
+    request.program = resolved.clone();
+    request.cwd = resolve_pty_cwd(Some(request.cwd.clone()));
+
+    let app_handle = app.clone();
+    let sink: EventSink = Arc::new(move |event: AgentEvent| {
+        let _ = app_handle.emit("agent-event", event);
+    });
+
+    state
+        .agents
+        .spawn(request, Some(get_login_shell_path()), sink)?;
+    Ok(resolved)
+}
+
+/// Terminate a worker (SIGTERM to its process group, then SIGKILL). Idempotent.
+#[tauri::command]
+fn agent_kill(run_id: String, state: State<'_, AppState>) -> bool {
+    state.agents.kill(&run_id)
+}
+
+#[tauri::command]
+fn agent_kill_all(state: State<'_, AppState>) {
+    state.agents.kill_all();
+}
+
+/// Run ids of workers that are still alive (used to reconcile UI state after a reload).
+#[tauri::command]
+fn agent_list(state: State<'_, AppState>) -> Vec<String> {
+    state.agents.active_ids()
 }
 
 #[tauri::command]
@@ -2033,6 +2122,10 @@ pub fn run() {
             pty_write,
             pty_resize,
             pty_kill,
+            agent_spawn,
+            agent_kill,
+            agent_kill_all,
+            agent_list,
             ask_claude,
             ai_chat,
             read_project_source_files,
@@ -2040,6 +2133,16 @@ pub fn run() {
             stop_velix_engine,
             get_velix_engine_url
         ])
-        .run(tauri::generate_context!())
-        .expect("error while running tauri application");
+        .build(tauri::generate_context!())
+        .expect("error while building tauri application")
+        .run(|app_handle, event| {
+            if let tauri::RunEvent::Exit = event {
+                // Never leave headless workers running after the app quits.
+                if let Some(state) = app_handle.try_state::<AppState>() {
+                    state.agents.kill_all();
+                    // Give the watcher threads a moment to deliver SIGTERM/SIGKILL.
+                    std::thread::sleep(std::time::Duration::from_millis(300));
+                }
+            }
+        });
 }

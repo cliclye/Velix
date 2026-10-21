@@ -9,7 +9,7 @@ import { velixEngine } from './velix-engine';
  */
 export class AIService {
     private currentProvider: ProviderID = 'claude';
-    private currentModel: string = 'claude-sonnet-4-6';
+    private currentModel: string = PROVIDERS[0].models[0];
     /** Active session ID for the current conversation */
     private sessionID: string | null = null;
     /** In-memory message history per session (for multi-turn conversations) */

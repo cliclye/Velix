@@ -1,214 +1,41 @@
 /**
- * AgentManager — one-shot headless worker execution engine.
+ * AgentManager — runs swarm workers as one-shot headless CLI processes.
  *
- * Design (rebuilt from the ground up):
- *   Every agent is a single non-interactive CLI run inside a PTY:
+ * Each worker is a single child process started by the Rust agent runner
+ * (src-tauri/src/agent.rs). The runner reports `agent-event`s:
+ *   - output: stdout/stderr chunks
+ *   - exit:   exactly once, after all output was flushed, with the real exit code,
+ *             and flags for timeout / explicit kill
  *
- *     <cli> <headless flags> "$(cat promptfile)" ; exit $?
- *
- *   - The prompt is written to a file BEFORE the PTY exists (no delivery races).
- *   - The command is written to the PTY immediately after creation; the login
- *     shell executes it as soon as it boots (tty input is kernel-buffered).
- *   - The CLI runs headless (print/exec mode), streams output, and EXITS when
- *     done. `exit $?` closes the shell, so `pty-exit` is the completion signal
- *     and carries a real exit code.
- *
- *   There are NO readiness regexes, NO completion-marker polling, NO /exit
- *   escalation, and NO delivery timers. The only failsafe is a hard per-agent
- *   timeout. `runTask()` returns a Promise that resolves on exit — the swarm
- *   loop is plain async/await.
+ * `runTask()` returns a Promise that settles on that exit event. There are no
+ * readiness regexes, no completion heuristics, and no timers here: the hard timeout
+ * lives in Rust, so it still fires if the webview is throttled or reloaded.
  */
 
-import { invoke, listen, type UnlistenFn, writeTextFile, remove } from '../../platform/native';
-import {
-  Agent,
-  AgentRole,
-  AgentStatus,
-  AgentMetrics,
-  PatternMatch,
-  WorkerCLI,
-} from './types';
-import { SwarmEventEmitter } from './SwarmEventEmitter';
-import { aiService } from '../ai/AIService';
-import { formatCoordinatorHandoff, getRawAgentOutput } from './handoffOutput';
+import { invoke, listen, type UnlistenFn } from '../../platform/native';
+import type { Agent, AgentRole, AgentStatus, WorkerCLI } from './types';
+import { buildWorkerInvocation, createStreamParser, type StreamParser } from './workerCli';
+import { formatCoordinatorHandoff } from './handoffOutput';
 
-// ---------------------------------------------------------------------------
-// Payload parsing — Tauri emits snake_case; tolerate camelCase if serialization changes
-// ---------------------------------------------------------------------------
-
-function parsePtyOutputPayload(payload: unknown): { sessionId: string; data: string } | null {
-  if (payload === null || typeof payload !== 'object') return null;
-  const p = payload as Record<string, unknown>;
-  const sid = p.session_id ?? p.sessionId;
-  const data = p.data;
-  if (typeof sid !== 'string' || typeof data !== 'string') return null;
-  return { sessionId: sid, data };
-}
-
-function parsePtyExitPayload(
-  payload: unknown,
-): { sessionId: string; exitCode: number | null } | null {
-  if (payload === null || typeof payload !== 'object') return null;
-  const p = payload as Record<string, unknown>;
-  const sid = p.session_id ?? p.sessionId;
-  if (typeof sid !== 'string') return null;
-  const raw = p.exit_code ?? p.exitCode;
-  let exitCode: number | null = null;
-  if (typeof raw === 'number' && !Number.isNaN(raw)) {
-    exitCode = raw;
-  } else if (typeof raw === 'string' && raw.trim() !== '') {
-    const n = Number(raw);
-    if (!Number.isNaN(n)) exitCode = n;
-  }
-  return { sessionId: sid, exitCode };
-}
-
-// ---------------------------------------------------------------------------
-// Constants
-// ---------------------------------------------------------------------------
-
-const MAX_OUTPUT_BUFFER = 500;
-const MAX_TERMINAL_OUTPUT_CHARS = 250_000;
-
-/** Hard per-agent runtime cap. Headless CLIs can be quiet for long stretches
- *  (print mode emits at the end), so this is the ONLY failsafe — never kill on
- *  output inactivity. */
 export const DEFAULT_AGENT_TIMEOUT_MS = 20 * 60_000;
 export const MAX_MODE_AGENT_TIMEOUT_MS = 45 * 60_000;
 
-// ---------------------------------------------------------------------------
-// ANSI sanitizer
-// ---------------------------------------------------------------------------
+const MAX_OUTPUT_CHARS = 400_000;
+const MAX_STDERR_CHARS = 60_000;
 
-const ANSI_ESCAPE_REGEX = /\u001B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])|\u009B[0-?]*[ -/]*[@-~]/g;
-
-const sanitizeChunk = (data: string): string =>
-  data
-    .replace(/\r\n/g, '\n')
-    .replace(/\r/g, '\n')
-    .replace(ANSI_ESCAPE_REGEX, '')
-    .replace(/[\u0000-\u0008\u000B-\u001A\u001C-\u001F\u007F]/g, '');
-
-// ---------------------------------------------------------------------------
-// Shell quoting
-// ---------------------------------------------------------------------------
-
-/** POSIX-safe single-quote wrapping: ' → '"'"' */
-function shQuote(value: string): string {
-  return `'${value.replace(/'/g, `'"'"'`)}'`;
-}
-
-// ---------------------------------------------------------------------------
-// Worker CLI configuration (options, detection, persistence)
-// ---------------------------------------------------------------------------
-
-export interface WorkerCLIOption {
-  id: WorkerCLI;
-  name: string;
-  command: string;
-  description: string;
-  builtin?: boolean;
-}
-
-const BUILTIN_CLI_OPTIONS: WorkerCLIOption[] = [
-  { id: 'claude',  name: 'Claude Code', command: 'claude',  description: 'Anthropic Claude Code CLI', builtin: true },
-  { id: 'gemini',  name: 'Gemini CLI',  command: 'gemini',  description: 'Google Gemini terminal agent', builtin: true },
-  { id: 'velix',   name: 'Velix CLI',   command: 'velix',   description: 'Velix AI CLI', builtin: true },
-  { id: 'codex',   name: 'Codex CLI',   command: 'codex',   description: 'OpenAI Codex CLI', builtin: true },
-  { id: 'copilot', name: 'Copilot CLI', command: 'copilot', description: 'GitHub Copilot CLI', builtin: true },
-];
-
-const CUSTOM_CLI_STORAGE_KEY = 'velix-custom-cli-options';
-
-export function loadCustomCLIOptions(): WorkerCLIOption[] {
-  if (typeof window === 'undefined') return [];
-  try {
-    const raw = window.localStorage.getItem(CUSTOM_CLI_STORAGE_KEY);
-    if (!raw) return [];
-    return JSON.parse(raw) as WorkerCLIOption[];
-  } catch {
-    return [];
-  }
-}
-
-export function saveCustomCLIOptions(options: WorkerCLIOption[]): void {
-  if (typeof window === 'undefined') return;
-  window.localStorage.setItem(CUSTOM_CLI_STORAGE_KEY, JSON.stringify(options));
-}
-
-export function getWorkerCLIOptions(): WorkerCLIOption[] {
-  return [...BUILTIN_CLI_OPTIONS, ...loadCustomCLIOptions()];
-}
-
-/** @deprecated Use getWorkerCLIOptions() instead — kept for import compatibility */
-export const WORKER_CLI_OPTIONS = BUILTIN_CLI_OPTIONS;
-
-export interface WorkerCLIStatus {
-  available: boolean;
-  detail: string;
-}
-
-export async function detectWorkerCLIAvailability(
-  _cwd: string,
-): Promise<Record<WorkerCLI, WorkerCLIStatus>> {
-  const allOptions = getWorkerCLIOptions();
-  const entries = await Promise.all(
-    allOptions.map(async (option) => {
-      try {
-        const path = await invoke<string>('check_cli_available', { command: option.command });
-        return [option.id, { available: true, detail: path }] as const;
-      } catch {
-        return [option.id, { available: false, detail: 'Not found in PATH' }] as const;
-      }
-    }),
-  );
-  return Object.fromEntries(entries) as Record<WorkerCLI, WorkerCLIStatus>;
-}
-
-/**
- * Build the one-shot headless command for a worker CLI.
- * `promptArg` is the shell expression that yields the prompt text
- * (either `"$(cat 'file')"` or an inline quoted string).
- */
-export function buildHeadlessCommand(
-  workerCLI: WorkerCLI,
-  promptArg: string,
-  model?: { provider: string; model: string },
-): string {
-  const allOptions = getWorkerCLIOptions();
-  const cliOption = allOptions.find((o) => o.id === workerCLI);
-  const parts: string[] = [];
-
-  switch (workerCLI) {
-    case 'claude':
-      parts.push('claude', '--dangerously-skip-permissions', '-p', promptArg);
-      if (model?.provider === 'claude' && model.model) parts.push('--model', shQuote(model.model));
-      break;
-    case 'gemini':
-      parts.push('gemini', '--yolo', '-p', promptArg);
-      if (model?.provider === 'gemini' && model.model) parts.push('-m', shQuote(model.model));
-      break;
-    case 'codex':
-      parts.push('codex', 'exec', '--full-auto', promptArg);
-      if (model?.provider === 'chatgpt' && model.model) parts.push('-m', shQuote(model.model));
-      break;
-    case 'copilot':
-      parts.push('copilot', '-p', promptArg, '--allow-all-tools');
-      break;
-    case 'velix':
-      parts.push('velix', '-p', promptArg);
-      break;
-    default:
-      parts.push(cliOption ? cliOption.command : 'claude --dangerously-skip-permissions', '-p', promptArg);
-      break;
-  }
-
-  return parts.join(' ');
-}
-
-// ---------------------------------------------------------------------------
-// Run result
-// ---------------------------------------------------------------------------
+/** Payload of the Rust `agent-event` (serde tag = "kind", snake_case). */
+export type AgentRunnerEvent =
+  | { kind: 'output'; run_id: string; stream: 'stdout' | 'stderr'; data: string }
+  | {
+      kind: 'exit';
+      run_id: string;
+      exit_code: number | null;
+      signal: number | null;
+      timed_out: boolean;
+      killed: boolean;
+      duration_ms: number;
+      error: string | null;
+    };
 
 export interface AgentRunResult {
   agentId: string;
@@ -219,600 +46,375 @@ export interface AgentRunResult {
   failureReason?: string;
 }
 
-interface RunHandle {
-  resolve: (result: AgentRunResult) => void;
-  timeoutTimer: ReturnType<typeof setTimeout> | null;
-  timedOut: boolean;
+export interface RunTaskOptions {
+  assignmentId?: string;
+  label?: string;
+  ownedFiles?: string[];
+  timeoutMs?: number;
+  attempt?: number;
 }
 
-// ---------------------------------------------------------------------------
-// AgentManager
-// ---------------------------------------------------------------------------
+/** Transport seam so the manager can be tested without Tauri. */
+export interface AgentTransport {
+  spawn(request: {
+    runId: string;
+    program: string;
+    args: string[];
+    cwd: string;
+    stdin?: string;
+    env?: Record<string, string>;
+    timeoutMs?: number;
+  }): Promise<void>;
+  kill(runId: string): Promise<void>;
+  killAll(): Promise<void>;
+  subscribe(handler: (event: AgentRunnerEvent) => void): Promise<UnlistenFn>;
+}
+
+export const tauriAgentTransport: AgentTransport = {
+  async spawn(request) {
+    await invoke('agent_spawn', { request });
+  },
+  async kill(runId) {
+    await invoke('agent_kill', { runId });
+  },
+  async killAll() {
+    await invoke('agent_kill_all');
+  },
+  subscribe(handler) {
+    return listen<AgentRunnerEvent>('agent-event', (event) => handler(event.payload));
+  },
+};
+
+interface RunState {
+  agent: Agent;
+  parser: StreamParser | null;
+  timeoutMs: number;
+  settle: (result: AgentRunResult) => void;
+}
+
+const tail = (text: string, max: number) => (text.length > max ? text.slice(text.length - max) : text);
+
+function describeExit(event: Extract<AgentRunnerEvent, { kind: 'exit' }>, stderr: string, timeoutMs?: number): string {
+  if (event.error) return event.error;
+  if (event.timed_out) {
+    const mins = timeoutMs ? Math.round(timeoutMs / 60_000) : null;
+    return mins ? `Timed out after ${mins} min` : 'Timed out';
+  }
+  const lastErr = stderr
+    .split('\n')
+    .map((l) => l.trim())
+    .filter(Boolean)
+    .slice(-3)
+    .join(' · ');
+  const base = event.signal ? `Worker CLI was killed by signal ${event.signal}` : `Worker CLI exited with code ${event.exit_code}`;
+  return lastErr ? `${base} — ${lastErr.slice(0, 300)}` : base;
+}
 
 export class AgentManager {
-  private agents: Map<string, Agent> = new Map();
-  private eventEmitter: SwarmEventEmitter;
-  private workspacePath: string;
-  private workerCLI: WorkerCLI = 'claude';
-
-  private globalOutputListener: UnlistenFn | null = null;
-  private globalExitListener: UnlistenFn | null = null;
-  private outputCallbacks: Array<(agentId: string, data: string) => void> = [];
-  private exitCallbacks: Array<(agentId: string, exitCode: number | null) => void> = [];
-  private spawnCallbacks: Array<(agentId: string) => void> = [];
-  private patternDetector: ((output: string) => PatternMatch | null) | null = null;
-
-  /** Serialize PTY output handling per agent so chunks never interleave. */
-  private outputProcessing = new Map<string, Promise<void>>();
-  /** Dedup rapid prompt_detected events for the same pattern on one agent. */
-  private lastPromptMatch = new Map<string, string>();
-  /** Pending run promises keyed by agentId — resolved exactly once on exit. */
-  private runHandles = new Map<string, RunHandle>();
-
+  private agents = new Map<string, Agent>();
+  private runs = new Map<string, RunState>();
+  private runIdToAgentId = new Map<string, string>();
+  private listeners = new Set<() => void>();
+  private unlisten: UnlistenFn | null = null;
   private initPromise: Promise<void> | null = null;
+  private workerCLI: WorkerCLI = 'claude';
+  private workerModel = '';
+  private envForRun: () => Promise<Record<string, string>> = async () => ({});
+  private counter = 0;
 
-  constructor(eventEmitter: SwarmEventEmitter, workspacePath: string) {
-    this.eventEmitter = eventEmitter;
-    this.workspacePath = workspacePath;
-  }
+  constructor(
+    private workspacePath: string,
+    private transport: AgentTransport = tauriAgentTransport,
+  ) {}
 
-  setWorkerCLI(workerCLI: WorkerCLI): void { this.workerCLI = workerCLI; }
+  setWorkerCLI(cli: WorkerCLI): void { this.workerCLI = cli; }
   getWorkerCLI(): WorkerCLI { return this.workerCLI; }
+  setWorkerModel(model: string): void { this.workerModel = model; }
+  /** Provide per-run environment (e.g. API keys) lazily, so keys are read at spawn time. */
+  setEnvProvider(provider: () => Promise<Record<string, string>>): void { this.envForRun = provider; }
 
-  setPatternDetector(detector: (output: string) => PatternMatch | null): void {
-    this.patternDetector = detector;
+  /** Subscribe to any agent change (output, status). Returns unsubscribe. */
+  subscribe(listener: () => void): () => void {
+    this.listeners.add(listener);
+    return () => { this.listeners.delete(listener); };
   }
 
-  // -----------------------------------------------------------------------
-  // Initialization — global PTY event listeners (idempotent)
-  // -----------------------------------------------------------------------
+  private notify(): void {
+    for (const l of this.listeners) {
+      try { l(); } catch (err) { console.error('AgentManager listener error:', err); }
+    }
+  }
 
-  async initialize(): Promise<void> {
-    if (this.initPromise) return this.initPromise;
-
-    this.initPromise = (async () => {
-      this.globalOutputListener = await listen<unknown>('pty-output', (event) => {
-        const parsed = parsePtyOutputPayload(event.payload);
-        if (!parsed) return;
-        const agent = this.findAgentBySessionId(parsed.sessionId);
-        if (agent) {
-          this.enqueueAgentOutput(agent.id, parsed.data);
-        }
+  /** Register the global event listener. Idempotent. */
+  initialize(): Promise<void> {
+    if (!this.initPromise) {
+      this.initPromise = this.transport.subscribe((event) => this.handleEvent(event)).then((un) => {
+        this.unlisten = un;
+      }).catch((err) => {
+        this.initPromise = null;
+        throw err;
       });
-
-      this.globalExitListener = await listen<unknown>('pty-exit', (event) => {
-        const parsed = parsePtyExitPayload(event.payload);
-        if (!parsed) return;
-        const agent = this.findAgentBySessionId(parsed.sessionId);
-        if (agent) {
-          void this.finalizeAgentExit(agent.id, parsed.exitCode).catch((err) => {
-            console.error(`AgentManager: finalize exit failed for ${agent.id}:`, err);
-          });
-        }
-      });
-    })();
-
+    }
     return this.initPromise;
   }
 
-  // -----------------------------------------------------------------------
-  // Cleanup
-  // -----------------------------------------------------------------------
-
-  async cleanup(): Promise<void> {
-    if (this.agents.size > 0) {
-      await this.terminateAll('Agent manager cleanup');
-    }
-
+  async dispose(): Promise<void> {
+    await this.terminateAll('Agent manager disposed');
+    this.unlisten?.();
+    this.unlisten = null;
     this.initPromise = null;
-    if (this.globalOutputListener) { this.globalOutputListener(); this.globalOutputListener = null; }
-    if (this.globalExitListener)   { this.globalExitListener();   this.globalExitListener = null; }
-    this.agents.clear();
-    this.outputProcessing.clear();
-    this.lastPromptMatch.clear();
-    for (const handle of this.runHandles.values()) {
-      if (handle.timeoutTimer) clearTimeout(handle.timeoutTimer);
-    }
-    this.runHandles.clear();
-    this.outputCallbacks.length = 0;
-    this.exitCallbacks.length = 0;
-    this.spawnCallbacks.length = 0;
+    this.listeners.clear();
   }
 
-  private findAgentBySessionId(sessionId: string): Agent | undefined {
-    for (const agent of this.agents.values()) {
-      if (agent.sessionId === sessionId) return agent;
-    }
-    return undefined;
-  }
+  // -------------------------------------------------------------------------
+  // Events
+  // -------------------------------------------------------------------------
 
-  // -----------------------------------------------------------------------
-  // Output handling — serialized per agent
-  // -----------------------------------------------------------------------
+  private handleEvent(event: AgentRunnerEvent): void {
+    const run = this.runs.get(event.run_id);
+    if (!run) return;
+    const { agent } = run;
 
-  private enqueueAgentOutput(agentId: string, data: string): void {
-    const prev = this.outputProcessing.get(agentId) ?? Promise.resolve();
-    const next = prev
-      .then(() => this.handleAgentOutput(agentId, data))
-      .catch((err) => {
-        console.error('AgentManager: output handler error:', err);
-      });
-    this.outputProcessing.set(agentId, next);
-    void next.finally(() => {
-      if (this.outputProcessing.get(agentId) === next) {
-        this.outputProcessing.delete(agentId);
+    if (event.kind === 'output') {
+      agent.lastActivityAt = new Date();
+      if (event.stream === 'stderr') {
+        agent.stderr = tail(agent.stderr + event.data, MAX_STDERR_CHARS);
+      } else if (run.parser) {
+        run.parser.push(event.data);
+        this.syncFromParser(agent, run.parser);
+        agent.output = tail(agent.output + event.data, MAX_OUTPUT_CHARS);
+      } else {
+        agent.output = tail(agent.output + event.data, MAX_OUTPUT_CHARS);
       }
-    });
-  }
-
-  private async handleAgentOutput(agentId: string, data: string): Promise<void> {
-    const agent = this.agents.get(agentId);
-    if (!agent) return;
-
-    agent.lastActivityAt = new Date();
-    const combined = agent.terminalOutput + data;
-    if (combined.length > MAX_TERMINAL_OUTPUT_CHARS) {
-      agent.terminalOutputEpoch = (agent.terminalOutputEpoch ?? 0) + 1;
-    }
-    agent.terminalOutput = combined.slice(-MAX_TERMINAL_OUTPUT_CHARS);
-
-    const sanitized = sanitizeChunk(data);
-
-    const lines = sanitized.split('\n').map((line) => line.trimEnd());
-    agent.outputBuffer.push(...lines);
-    if (agent.outputBuffer.length > MAX_OUTPUT_BUFFER) {
-      agent.outputBuffer = agent.outputBuffer.slice(-MAX_OUTPUT_BUFFER);
-    }
-
-    this.eventEmitter.emitAgentEvent({ type: 'output', agentId, data: sanitized });
-
-    if (this.patternDetector) {
-      const match = this.patternDetector(sanitized);
-      if (match) {
-        const dedupKey = `${match.patternId}:${match.matchedText}`;
-        if (this.lastPromptMatch.get(agentId) !== dedupKey) {
-          this.lastPromptMatch.set(agentId, dedupKey);
-          agent.metrics.promptsProcessed++;
-          this.eventEmitter.emitAgentEvent({ type: 'prompt_detected', agentId, match });
-        }
-      }
-    }
-
-    for (const cb of this.outputCallbacks) {
-      try { cb(agentId, sanitized); } catch (err) { console.error('AgentManager: output callback error:', err); }
-    }
-  }
-
-  // -----------------------------------------------------------------------
-  // Exit handling — the one true completion signal
-  // -----------------------------------------------------------------------
-
-  private async drainAgentOutput(agentId: string): Promise<void> {
-    const pending = this.outputProcessing.get(agentId);
-    if (pending) {
-      await pending;
-    }
-  }
-
-  private async finalizeAgentExit(agentId: string, exitCode: number | null): Promise<void> {
-    // Ensure the last output chunk is folded into terminalOutput before handoff.
-    await this.drainAgentOutput(agentId);
-
-    const agent = this.agents.get(agentId);
-    if (!agent) return;
-    if (agent.status === 'terminated') {
-      this.settleRun(agentId, {
-        agentId,
-        status: 'terminated',
-        exitCode,
-        output: this.getAgentHandoffOutput(agentId),
-        failureReason: agent.failureReason,
-      });
+      this.notify();
       return;
     }
 
-    const handle = this.runHandles.get(agentId);
-    const aliveMs = Date.now() - agent.startedAt.getTime();
-    console.log(
-      `AgentManager: pty-exit for ${agentId} | exitCode=${exitCode} aliveMs=${aliveMs} label=${agent.label}`,
-    );
+    // exit
+    run.parser?.end();
+    if (run.parser) this.syncFromParser(agent, run.parser);
+    agent.endedAt = new Date();
+    agent.exitCode = event.exit_code;
 
-    this.lastPromptMatch.delete(agentId);
+    const parsed = run.parser?.snapshot();
+    const streamFailed = parsed?.isError === true;
+    const cleanExit = !event.error && !event.timed_out && !event.killed && event.exit_code === 0 && !streamFailed;
 
-    if (agent.promptFilePath) {
-      remove(agent.promptFilePath).catch(() => {});
-    }
-
-    const code = exitCode ?? 0;
-    const timedOut = handle?.timedOut === true;
-    agent.status = code === 0 && !timedOut ? 'completed' : 'failed';
-
-    if (agent.status === 'failed') {
-      const aliveStr = aliveMs < 1000 ? `${aliveMs}ms` : `${(aliveMs / 1000).toFixed(1)}s`;
-      agent.failureReason = timedOut
-        ? `Agent timed out after ${aliveStr}`
-        : `Worker CLI exited with code ${code} after ${aliveStr}`;
-    }
-
-    const output = this.getAgentHandoffOutput(agentId);
-
-    if (agent.status === 'completed') {
-      this.eventEmitter.emitAgentEvent({
-        type: 'completed',
-        agentId,
-        result: {
-          id: `result_${agentId}`,
-          agentId,
-          role: agent.role.type,
-          description: agent.assignedTask,
-          status: 'completed',
-          startedAt: agent.startedAt,
-          completedAt: new Date(),
-          output,
-          filesModified: agent.metrics.filesModified,
-        },
-      });
+    if (agent.status === 'terminated' || event.killed) {
+      agent.status = 'terminated';
+      agent.failureReason ||= 'Stopped by user';
+    } else if (cleanExit) {
+      agent.status = 'completed';
     } else {
-      this.eventEmitter.emitAgentEvent({
-        type: 'failed',
-        agentId,
-        error: agent.failureReason || `Agent exited with code ${code}`,
-      });
-    }
-
-    this.settleRun(agentId, {
-      agentId,
-      status: agent.status,
-      exitCode,
-      output,
-      failureReason: agent.failureReason,
-    });
-
-    for (const cb of this.exitCallbacks) {
-      try { cb(agentId, code); } catch (err) { console.error('AgentManager: exit callback error:', err); }
-    }
-  }
-
-  private settleRun(agentId: string, result: AgentRunResult): void {
-    const handle = this.runHandles.get(agentId);
-    if (!handle) return;
-    this.runHandles.delete(agentId);
-    if (handle.timeoutTimer) clearTimeout(handle.timeoutTimer);
-    handle.resolve(result);
-  }
-
-  // -----------------------------------------------------------------------
-  // Spawn — one-shot headless run
-  // -----------------------------------------------------------------------
-
-  async spawnAgent(
-    role: AgentRole,
-    task: string,
-    options?: {
-      assignmentId?: string;
-      label?: string;
-      ownedFiles?: string[];
-      timeoutMs?: number;
-    },
-  ): Promise<Agent> {
-    const agentId = `agent_${Date.now()}_${Math.random().toString(36).slice(2, 11)}`;
-    const sessionId = `swarm_${agentId}`;
-
-    // ── Step 1: Write the prompt file BEFORE creating the PTY ──────────
-    const prompt = this.buildPrompt(role, task);
-    const promptFileName = `.velix_swarm_prompt_${agentId}.txt`;
-    const promptFilePath = `${this.workspacePath}/${promptFileName}`;
-
-    let promptArg: string;
-    let promptFileOk = false;
-    try {
-      await writeTextFile(promptFilePath, prompt);
-      promptFileOk = true;
-      promptArg = `"$(cat ${shQuote(promptFileName)})"`;
-    } catch (err) {
-      console.warn(`AgentManager: prompt file write failed for ${agentId}, embedding inline:`, err);
-      promptArg = shQuote(prompt);
-    }
-
-    // ── Step 2: Build the one-shot command ─────────────────────────────
-    const config = aiService.getConfig();
-    const cliCommand = buildHeadlessCommand(this.workerCLI, promptArg, config);
-    // `exit $?` propagates the CLI exit code through the shell → pty-exit.
-    const oneShot = `set +e 2>/dev/null; clear 2>/dev/null; ${cliCommand}; exit $?\r`;
-
-    // ── Step 3: Create PTY and write the command immediately ───────────
-    // Input is kernel-buffered; the login shell executes it once booted.
-    await invoke('pty_create', {
-      sessionId,
-      rows: 50,
-      cols: 220,
-      cwd: this.workspacePath,
-    });
-
-    const agent: Agent = {
-      id: agentId,
-      role,
-      sessionId,
-      assignmentId: options?.assignmentId,
-      label: options?.label,
-      ownedFiles: options?.ownedFiles || [],
-      status: 'running',
-      assignedTask: task,
-      startedAt: new Date(),
-      lastActivityAt: new Date(),
-      outputBuffer: [],
-      terminalOutput: '',
-      terminalOutputEpoch: 0,
-      metrics: {
-        promptsProcessed: 0,
-        filesModified: [],
-        testsRun: 0,
-        errorsEncountered: 0,
-        autoApprovals: 0,
-        escalations: 0,
-      },
-      promptFilePath: promptFileOk ? promptFilePath : undefined,
-      promptFileWritten: promptFileOk,
-      // One-shot mode: the command carries the prompt, so both are true at spawn.
-      cliLaunched: true,
-      promptDelivered: true,
-    };
-
-    this.agents.set(agentId, agent);
-
-    try {
-      await invoke('pty_write', { sessionId, data: oneShot });
-    } catch (err) {
-      console.error(`AgentManager: failed to write one-shot command for ${agentId}:`, err);
       agent.status = 'failed';
-      agent.failureReason = `Failed to start worker CLI: ${err}`;
-      void invoke('pty_kill', { sessionId }).catch(() => {});
+      agent.failureReason = streamFailed && parsed?.finalText
+        ? parsed.finalText.slice(0, 300)
+        : describeExit(event, agent.stderr, run.timeoutMs);
     }
 
-    console.log(
-      `AgentManager: spawned one-shot ${agentId} (cli=${this.workerCLI}, session=${sessionId}, promptFile=${promptFileOk})`,
-    );
+    agent.result = this.handoffText(agent);
+    this.runs.delete(event.run_id);
+    this.runIdToAgentId.delete(event.run_id);
+    this.notify();
+    run.settle(this.resultFor(agent));
+  }
 
-    this.eventEmitter.emitAgentEvent({ type: 'spawned', agentId, role: role.type });
+  private syncFromParser(agent: Agent, parser: StreamParser): void {
+    const snap = parser.snapshot();
+    agent.activity = snap.activity;
+    agent.filesTouched = snap.filesTouched;
+    if (snap.costUsd !== undefined) agent.costUsd = snap.costUsd;
+  }
 
-    for (const cb of this.spawnCallbacks) {
-      try { cb(agentId); } catch { /* ignore */ }
-    }
+  /** Text handed to downstream agents / the coordinator. */
+  private handoffText(agent: Agent): string {
+    const parsed = agent.output ? this.parsedText(agent) : '';
+    const text = parsed || agent.output;
+    return formatCoordinatorHandoff(text, agent.role.type);
+  }
 
-    return agent;
+  private parsedText(agent: Agent): string {
+    // Re-derive from raw stream-json so the final `result` text wins over partial narration.
+    if (!agent.output.includes('"type":')) return '';
+    const parser = createStreamParser();
+    parser.push(agent.output);
+    parser.end();
+    const snap = parser.snapshot();
+    return snap.finalText ?? snap.assistantText;
+  }
+
+  private resultFor(agent: Agent): AgentRunResult {
+    const status: AgentRunResult['status'] =
+      agent.status === 'completed' ? 'completed' : agent.status === 'terminated' ? 'terminated' : 'failed';
+    return {
+      agentId: agent.id,
+      status,
+      exitCode: agent.exitCode ?? null,
+      output: this.handoffText(agent),
+      failureReason: agent.failureReason,
+    };
+  }
+
+  // -------------------------------------------------------------------------
+  // Run
+  // -------------------------------------------------------------------------
+
+  private buildPrompt(role: AgentRole, task: string): string {
+    return [
+      role.systemPrompt,
+      '',
+      `Working Directory: ${this.workspacePath}`,
+      `Role: ${role.name}`,
+      `Capabilities: ${role.capabilities.join(', ')}`,
+      `Restrictions: ${role.restrictions.join(', ')}`,
+      '',
+      role.initialPrompt,
+      '',
+      `Task: ${task}`,
+    ].join('\n');
   }
 
   /**
-   * Spawn an agent and resolve when it finishes (exit, timeout, or termination).
-   * This is the primary API for the swarm loop — no event-listener bookkeeping.
+   * Start a worker and resolve when it finishes (exit, timeout, or termination).
+   * Never rejects: spawn failures resolve as `failed` with a readable reason.
    */
-  async runTask(
-    role: AgentRole,
-    task: string,
-    options?: {
-      assignmentId?: string;
-      label?: string;
-      ownedFiles?: string[];
-      timeoutMs?: number;
-    },
-  ): Promise<AgentRunResult> {
-    const agent = await this.spawnAgent(role, task, options);
+  async runTask(role: AgentRole, task: string, options: RunTaskOptions = {}): Promise<AgentRunResult> {
+    await this.initialize();
 
-    // The agent may already be settled if the shell died during spawn.
-    if (agent.status !== 'running') {
-      return {
-        agentId: agent.id,
-        status: agent.status === 'completed' ? 'completed' : agent.status === 'terminated' ? 'terminated' : 'failed',
-        exitCode: null,
-        output: this.getAgentHandoffOutput(agent.id),
-        failureReason: agent.failureReason,
-      };
-    }
+    const id = `agent_${Date.now().toString(36)}_${(this.counter++).toString(36)}`;
+    const runId = `swarm_${id}`;
+    const agent: Agent = {
+      id,
+      role,
+      runId,
+      assignmentId: options.assignmentId,
+      label: options.label,
+      ownedFiles: options.ownedFiles ?? [],
+      status: 'initializing',
+      assignedTask: task,
+      attempt: options.attempt ?? 1,
+      startedAt: new Date(),
+      lastActivityAt: new Date(),
+      output: '',
+      stderr: '',
+      activity: [],
+      filesTouched: [],
+    };
+    this.agents.set(id, agent);
+    this.notify();
 
-    const timeoutMs = options?.timeoutMs ?? DEFAULT_AGENT_TIMEOUT_MS;
+    const invocation = buildWorkerInvocation(this.workerCLI, this.buildPrompt(role, task), this.workerModel);
+    const timeoutMs = options.timeoutMs ?? DEFAULT_AGENT_TIMEOUT_MS;
 
     return new Promise<AgentRunResult>((resolve) => {
-      const handle: RunHandle = { resolve, timeoutTimer: null, timedOut: false };
+      const state: RunState = {
+        agent,
+        parser: invocation.streamJson ? createStreamParser() : null,
+        timeoutMs,
+        settle: resolve,
+      };
+      this.runs.set(runId, state);
+      this.runIdToAgentId.set(runId, id);
 
-      handle.timeoutTimer = setTimeout(() => {
-        handle.timedOut = true;
-        const a = this.agents.get(agent.id);
-        if (!a || a.status !== 'running') return;
-        console.warn(`AgentManager: ${agent.id} hit ${timeoutMs}ms timeout — killing PTY`);
-        void invoke('pty_kill', { sessionId: a.sessionId }).catch(() => {
-          // If the kill fails, resolve directly so the swarm never hangs.
-          a.status = 'failed';
-          a.failureReason = `Agent timed out after ${Math.round(timeoutMs / 1000)}s (kill failed)`;
-          this.settleRun(agent.id, {
-            agentId: agent.id,
-            status: 'failed',
-            exitCode: null,
-            output: this.getAgentHandoffOutput(agent.id),
-            failureReason: a.failureReason,
+      // Status can change while we await (a stop request); a function defeats TS narrowing.
+      const stopRequested = () => agent.status === 'terminated';
+
+      void (async () => {
+        try {
+          const env = await this.envForRun();
+          // Honour a stop request that arrived while we were preparing.
+          if (stopRequested()) {
+            this.finishWithoutProcess(runId, 'terminated', 'Stopped before start');
+            return;
+          }
+          agent.status = 'running';
+          this.notify();
+          await this.transport.spawn({
+            runId,
+            program: invocation.program,
+            args: invocation.args,
+            cwd: this.workspacePath,
+            stdin: invocation.stdin,
+            env,
+            timeoutMs,
           });
-        });
-      }, timeoutMs);
-
-      this.runHandles.set(agent.id, handle);
+          // A stop that raced the spawn: the process exists now, so kill it.
+          if (stopRequested()) await this.transport.kill(runId).catch(() => {});
+        } catch (err) {
+          this.finishWithoutProcess(runId, 'failed', err instanceof Error ? err.message : String(err));
+        }
+      })();
     });
   }
 
-  // -----------------------------------------------------------------------
-  // Prompt builder
-  // -----------------------------------------------------------------------
-
-  private buildPrompt(role: AgentRole, task: string): string {
-    const contextInfo = `
-Working Directory: ${this.workspacePath}
-Role: ${role.name}
-Capabilities: ${role.capabilities.join(', ')}
-Restrictions: ${role.restrictions.join(', ')}
-`;
-    return `${role.systemPrompt}\n\n${contextInfo}\n\n${role.initialPrompt}\n\nTask: ${task}`;
+  private finishWithoutProcess(runId: string, status: 'failed' | 'terminated', reason: string): void {
+    const run = this.runs.get(runId);
+    if (!run) return;
+    run.agent.status = status;
+    run.agent.failureReason = reason;
+    run.agent.endedAt = new Date();
+    run.agent.result = this.handoffText(run.agent);
+    this.runs.delete(runId);
+    this.runIdToAgentId.delete(runId);
+    this.notify();
+    run.settle(this.resultFor(run.agent));
   }
 
-  // -----------------------------------------------------------------------
-  // Agent interaction
-  // -----------------------------------------------------------------------
-
-  async sendToAgent(agentId: string, data: string): Promise<void> {
-    const agent = this.agents.get(agentId);
-    if (!agent) throw new Error(`Agent not found: ${agentId}`);
-    await invoke('pty_write', { sessionId: agent.sessionId, data });
-  }
-
-  async respondToAgent(agentId: string, response: string): Promise<void> {
-    await this.sendToAgent(agentId, `${response}\r`);
-  }
-
-  // -----------------------------------------------------------------------
+  // -------------------------------------------------------------------------
   // Termination
-  // -----------------------------------------------------------------------
+  // -------------------------------------------------------------------------
 
-  async terminateAgent(agentId: string, reason: string = 'User terminated'): Promise<void> {
+  async terminateAgent(agentId: string, reason = 'Stopped by user'): Promise<void> {
     const agent = this.agents.get(agentId);
-    if (!agent) return;
-
+    if (!agent || (agent.status !== 'running' && agent.status !== 'initializing')) return;
     const wasRunning = agent.status === 'running';
     agent.status = 'terminated';
     agent.failureReason = reason;
-    this.lastPromptMatch.delete(agentId);
-
-    if (agent.promptFilePath) {
-      remove(agent.promptFilePath).catch(() => {});
-    }
-
+    this.notify();
     if (wasRunning) {
+      // The Rust side delivers SIGTERM→SIGKILL and then the exit event settles the run.
       try {
-        await invoke('pty_kill', { sessionId: agent.sessionId });
+        await this.transport.kill(agent.runId);
       } catch (err) {
-        console.error(`Failed to terminate agent ${agentId}:`, err);
+        console.error(`AgentManager: kill failed for ${agentId}:`, err);
+        this.finishWithoutProcess(agent.runId, 'terminated', reason);
       }
+    } else {
+      this.finishWithoutProcess(agent.runId, 'terminated', reason);
     }
-
-    // pty_kill drops the session without emitting pty-exit for an already-dead
-    // reader, so settle the run promise here to guarantee the loop continues.
-    this.settleRun(agentId, {
-      agentId,
-      status: 'terminated',
-      exitCode: null,
-      output: this.getAgentHandoffOutput(agentId),
-      failureReason: reason,
-    });
-
-    this.eventEmitter.emitAgentEvent({ type: 'terminated', agentId, reason });
-
-    for (const cb of this.exitCallbacks) {
-      try { cb(agentId, null); } catch (err) { console.error('AgentManager: exit callback error:', err); }
-    }
-
-    this.agents.delete(agentId);
   }
 
-  async terminateAll(reason: string = 'Swarm stopped'): Promise<void> {
-    const ids = Array.from(this.agents.keys());
-    await Promise.all(ids.map((id) => this.terminateAgent(id, reason)));
+  async terminateAll(reason = 'Swarm stopped'): Promise<void> {
+    const live = this.getAllAgents().filter((a) => a.status === 'running' || a.status === 'initializing');
+    await Promise.all(live.map((a) => this.terminateAgent(a.id, reason)));
   }
 
-  // -----------------------------------------------------------------------
+  // -------------------------------------------------------------------------
   // Queries
-  // -----------------------------------------------------------------------
+  // -------------------------------------------------------------------------
 
-  getAgent(agentId: string): Agent | null {
-    return this.agents.get(agentId) || null;
+  getAgent(agentId: string): Agent | null { return this.agents.get(agentId) ?? null; }
+  getAllAgents(): Agent[] { return [...this.agents.values()]; }
+
+  /** Latest attempt per assignment (what the UI shows on the board). */
+  getLatestAgents(): Agent[] {
+    const latest = new Map<string, Agent>();
+    for (const a of this.agents.values()) {
+      const key = a.assignmentId ?? a.id;
+      const prev = latest.get(key);
+      if (!prev || a.attempt >= prev.attempt) latest.set(key, a);
+    }
+    return [...latest.values()];
   }
-
-  getAllAgents(): Agent[] {
-    return Array.from(this.agents.values());
-  }
-
-  getAgentsByRole(roleType: string): Agent[] {
-    return Array.from(this.agents.values()).filter((a) => a.role.type === roleType);
-  }
-
-  getAgentCount(): number { return this.agents.size; }
 
   getActiveAgentCount(): number {
-    return Array.from(this.agents.values()).filter(
-      (a) => a.status === 'running' || a.status === 'waiting_for_input',
-    ).length;
+    return this.getAllAgents().filter((a) => a.status === 'running' || a.status === 'initializing').length;
   }
 
-  getAgentOutput(agentId: string): string[] {
-    const agent = this.agents.get(agentId);
-    return agent ? [...agent.outputBuffer] : [];
-  }
-
-  /** Structured handoff (or denoised full output) for coordinator consumption. */
-  getAgentHandoffOutput(agentId: string): string {
-    const agent = this.agents.get(agentId);
-    if (!agent) return '';
-    return formatCoordinatorHandoff(getRawAgentOutput(agent), agent.role.type);
-  }
-
-  // -----------------------------------------------------------------------
-  // Subscriptions
-  // -----------------------------------------------------------------------
-
-  onAgentOutput(callback: (agentId: string, data: string) => void): () => void {
-    this.outputCallbacks.push(callback);
-    return () => {
-      const i = this.outputCallbacks.indexOf(callback);
-      if (i !== -1) this.outputCallbacks.splice(i, 1);
-    };
-  }
-
-  onAgentExit(callback: (agentId: string, exitCode: number | null) => void): () => void {
-    this.exitCallbacks.push(callback);
-    return () => {
-      const i = this.exitCallbacks.indexOf(callback);
-      if (i !== -1) this.exitCallbacks.splice(i, 1);
-    };
-  }
-
-  onAgentSpawned(callback: (agentId: string) => void): () => void {
-    this.spawnCallbacks.push(callback);
-    return () => {
-      const i = this.spawnCallbacks.indexOf(callback);
-      if (i !== -1) this.spawnCallbacks.splice(i, 1);
-    };
-  }
-
-  // -----------------------------------------------------------------------
-  // Metrics helpers
-  // -----------------------------------------------------------------------
-
-  updateAgentMetrics(agentId: string, updates: Partial<AgentMetrics>): void {
-    const agent = this.agents.get(agentId);
-    if (agent) agent.metrics = { ...agent.metrics, ...updates };
-  }
-
-  updateAgentStatus(agentId: string, status: AgentStatus): void {
-    const agent = this.agents.get(agentId);
-    if (agent) agent.status = status;
-  }
-
-  getStalledAgents(thresholdMs: number = 60000): Agent[] {
-    const now = Date.now();
-    return Array.from(this.agents.values()).filter((a) => {
-      if (a.status !== 'running') return false;
-      return now - a.lastActivityAt.getTime() > thresholdMs;
-    });
-  }
-
-  getAgentHealth(agentId: string): {
-    status: 'healthy' | 'stalled' | 'erroring' | 'completed';
-    lastActivity: Date;
-    errorRate: number;
-  } | null {
-    const agent = this.agents.get(agentId);
-    if (!agent) return null;
-    const timeSinceActivity = Date.now() - agent.lastActivityAt.getTime();
-    const errorRate = agent.metrics.errorsEncountered / Math.max(agent.metrics.promptsProcessed, 1);
-    let status: 'healthy' | 'stalled' | 'erroring' | 'completed' = 'healthy';
-    if (agent.status === 'completed' || agent.status === 'failed') status = 'completed';
-    else if (timeSinceActivity > 60000) status = 'stalled';
-    else if (errorRate > 0.5) status = 'erroring';
-    return { status, lastActivity: agent.lastActivityAt, errorRate };
+  clearFinished(): void {
+    for (const [id, a] of this.agents) {
+      if (a.status !== 'running' && a.status !== 'initializing') this.agents.delete(id);
+    }
+    this.notify();
   }
 }
