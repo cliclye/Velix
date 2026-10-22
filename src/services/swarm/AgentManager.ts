@@ -100,8 +100,11 @@ const COMPLETION_GRACE_MS = 12_000;
 /** Quiet-time after a completion marker before we decide "yes, really done". */
 const COMPLETION_QUIET_AFTER_MARKER_MS = 8_000;
 
-/** Absolute quiet-time without any output (no marker) before we assume stuck at idle prompt. */
-const COMPLETION_IDLE_TIMEOUT_MS = 45_000;
+/** Absolute quiet-time without any output before we assume the agent is stuck. */
+const COMPLETION_IDLE_TIMEOUT_MS = 120_000;
+
+/** Minimum active work time before idle-based exit is allowed. */
+const COMPLETION_MIN_WORK_MS = 180_000;
 
 /** Time after sending `/exit` before we force-kill the PTY. */
 const EXIT_ESCALATION_MS = 12_000;
@@ -116,7 +119,7 @@ type AgentPhase = 'spawning' | 'launching_cli' | 'working' | 'exiting';
 // Shell / CLI readiness detection patterns
 // ---------------------------------------------------------------------------
 
-/** Common shell prompts (zsh %, bash $, root #, oh-my-zsh arrows, etc.). */
+/** Common shell prompts (zsh %, bash $, root #, oh-my-zsh arrows, PowerShell, etc.). */
 const SHELL_READY_PATTERNS: RegExp[] = [
   /%\s*$/m,
   /\$\s*$/m,
@@ -125,26 +128,23 @@ const SHELL_READY_PATTERNS: RegExp[] = [
   /➜\s*$/m,
   /›\s*$/m,
   /\[.*\][%$#]\s*$/m,
+  /PS [^\n>]*>\s*$/m,
 ];
 
 /** Patterns that indicate a TUI CLI has fully loaded and is waiting for input. */
-const CLI_READY_COMMON: RegExp[] = [
-  // Explicit prompts
+const CLI_READY_GENERIC: RegExp[] = [
   /Type your message/i,
   /Tips for getting started/i,
   /awaiting (your )?(input|message|reply)/i,
   /Press enter to continue/i,
-  // Claude Code's rounded bottom border appears once the TUI is mounted
   /╰─+╯/,
-  // Several TUIs draw a chevron or arrow on the input line
-  /›\s*$/m,
-  /❯\s*$/m,
   /▎\s*$/m,
 ];
 
 const CLI_READY_HINTS_CLAUDE: RegExp[] = [
   /[✢✻✦✳✽]/,
   /Welcome to Claude/i,
+  /Claude Code/i,
 ];
 const CLI_READY_HINTS_GEMINI: RegExp[] = [/gemini/i, /google/i];
 const CLI_READY_HINTS_CODEX: RegExp[] = [/codex/i];
@@ -169,23 +169,55 @@ function mergePatterns(...groups: RegExp[][]): RegExp[] {
   return out;
 }
 
+/** Shell chevrons alone are not enough — they match before the CLI TUI mounts. */
+const CLI_SHELL_CHEVRON_ONLY = /^[\s›❯➜>]+$/m;
+
 export function getCliReadyPatterns(workerCLI: WorkerCLI): RegExp[] {
   if (BUILTIN_WORKER_CLI_IDS.has(workerCLI)) {
     switch (workerCLI) {
-      case 'claude':  return mergePatterns(CLI_READY_COMMON, CLI_READY_HINTS_CLAUDE);
-      case 'gemini':  return mergePatterns(CLI_READY_COMMON, CLI_READY_HINTS_GEMINI);
-      case 'codex':   return mergePatterns(CLI_READY_COMMON, CLI_READY_HINTS_CODEX);
-      default:        return CLI_READY_COMMON;
+      case 'claude':  return mergePatterns(CLI_READY_GENERIC, CLI_READY_HINTS_CLAUDE);
+      case 'gemini':  return mergePatterns(CLI_READY_GENERIC, CLI_READY_HINTS_GEMINI);
+      case 'codex':   return mergePatterns(CLI_READY_GENERIC, CLI_READY_HINTS_CODEX);
+      default:        return CLI_READY_GENERIC;
     }
   }
   return mergePatterns(
-    CLI_READY_COMMON,
+    CLI_READY_GENERIC,
     CLI_READY_HINTS_CLAUDE,
     CLI_READY_HINTS_GEMINI,
     CLI_READY_HINTS_CODEX,
     CLI_READY_HINTS_COPILOT,
     CLI_READY_HINTS_VELIX,
   );
+}
+
+function isCliReady(workerCLI: WorkerCLI, accumulator: string, sinceLaunchMs: number): boolean {
+  if (sinceLaunchMs < 2_500) return false;
+  const text = accumulator.trim();
+  if (!text) return false;
+
+  const patterns = getCliReadyPatterns(workerCLI);
+  if (!patterns.some((pattern) => pattern.test(text))) return false;
+
+  // Reject bare shell prompts unless a CLI-specific hint is also present.
+  const hasCliHint = mergePatterns(
+    CLI_READY_HINTS_CLAUDE,
+    CLI_READY_HINTS_GEMINI,
+    CLI_READY_HINTS_CODEX,
+    CLI_READY_HINTS_COPILOT,
+    CLI_READY_HINTS_VELIX,
+    [/Type your message/i, /Tips for getting started/i, /╰─+╯/, /Welcome to Claude/i],
+  ).some((pattern) => pattern.test(text));
+
+  if (!hasCliHint && CLI_SHELL_CHEVRON_ONLY.test(text.slice(-80))) {
+    return false;
+  }
+
+  return true;
+}
+
+function isWindowsHost(): boolean {
+  return typeof navigator !== 'undefined' && /Win/i.test(navigator.userAgent);
 }
 
 // ---------------------------------------------------------------------------
@@ -203,23 +235,42 @@ function sanitizeTerminalOutput(data: string): string {
 }
 
 // ---------------------------------------------------------------------------
-// Completion markers — any one of these plus a quiet PTY means "the CLI is done"
+// Completion detection — role-specific structured reports, not timing lines
 // ---------------------------------------------------------------------------
 
-const COMPLETION_MARKERS: RegExp[] = [
-  /---END-SCOUT-FINDINGS---/,
-  /---END-BUILDER-REPORT---/,
-  /---END-REVIEW-VERDICT---/,
-  // Claude Code timing/usage lines that only appear after the assistant finishes
-  /\b(Baked|Brewed|Worked|Churned|Cogitated|Processed|Finished)\s+for\s+/i,
-  // Claude Code prints this once the CLI has fully exited back to the shell
-  /Resume this session with:/i,
-  // Some CLIs print this on successful completion
-  /^\s*Done\.\s*$/m,
-];
+const IMPLEMENTATION_ROLES = new Set<string>([
+  'builder',
+  'implementer',
+  'frontend',
+  'backend',
+  'qa',
+  'refactorer',
+  'tester',
+  'security',
+]);
 
-function hasCompletionMarker(text: string): boolean {
-  return COMPLETION_MARKERS.some((r) => r.test(text));
+const CODING_ROLE_TYPES = IMPLEMENTATION_ROLES;
+
+function hasAgentCompletionSignal(roleType: string, text: string): boolean {
+  if (/Resume this session with:/i.test(text)) {
+    return true;
+  }
+
+  if (roleType === 'scout') {
+    return /---END-SCOUT-FINDINGS---/.test(text);
+  }
+
+  if (roleType === 'reviewer') {
+    return /---END-REVIEW-VERDICT---/.test(text);
+  }
+
+  if (IMPLEMENTATION_ROLES.has(roleType)) {
+    return /---END-BUILDER-REPORT---/.test(text);
+  }
+
+  return /---END-BUILDER-REPORT---/.test(text)
+    || /---END-SCOUT-FINDINGS---/.test(text)
+    || /---END-REVIEW-VERDICT---/.test(text);
 }
 
 function hasJsonFence(text: string): boolean {
@@ -649,9 +700,13 @@ export class AgentManager {
     const noFollowUp =
       'Do NOT ask follow-up questions or request clarification. Work with the information provided. Begin immediately. When finished with your assigned task, quit the CLI (use /exit, /quit, or your CLI\'s exit command) so the swarm can continue.';
 
+    const codingDirective = CODING_ROLE_TYPES.has(role.type)
+      ? 'You MUST use your CLI\'s file edit/write tools to make real changes on disk in this workspace before finishing. Do not stop after planning or summarizing — implement the work, then print the required completion report block from your instructions.'
+      : '';
+
     const shortInstruction = promptFileOk
-      ? `Read the file ./${promptFileName} in the current directory. It contains your full task instructions. Follow every instruction in that file exactly — do not summarize or skip anything. ${noFollowUp}`
-      : `${fullPrompt}\n\n${noFollowUp}`;
+      ? `Read the file ./${promptFileName} in the current directory. It contains your full task instructions. Follow every instruction in that file exactly — do not summarize or skip anything. ${codingDirective} ${noFollowUp}`.replace(/\s+/g, ' ').trim()
+      : `${fullPrompt}\n\n${codingDirective}\n\n${noFollowUp}`.trim();
 
     // ── 2. Create the PTY. This spawns `sh -l` with the workspace as cwd.
     //       We deliberately launch a shell (not the CLI directly) so the
@@ -986,7 +1041,7 @@ export class AgentManager {
           }
         }
 
-        if (hasCompletionMarker(sanitizedOutput) && quietMs >= 1500) {
+        if (/Resume this session with:/i.test(sanitizedOutput) && quietMs >= 1500) {
           finish(true);
           return;
         }
@@ -1014,9 +1069,8 @@ export class AgentManager {
             return;
           }
 
-          if (cliLaunched && !promptDelivered && Date.now() - cliLaunchedAt > 1500) {
-            const patterns = getCliReadyPatterns(this.workerCLI);
-            if (patterns.some((p) => p.test(accumulator))) {
+          if (cliLaunched && !promptDelivered) {
+            if (isCliReady(this.workerCLI, accumulator, Date.now() - cliLaunchedAt)) {
               void tryDeliverPrompt('cli-ready');
             }
           }
@@ -1029,7 +1083,7 @@ export class AgentManager {
           if (!parsed || parsed.sessionId !== sessionId || settled) return;
           const hasDelimited = extractDelimitedResult(sanitizedOutput, markerStart, markerEnd) !== null;
           const hasJson = extractLastJsonObjectText(sanitizedOutput) !== null;
-          const hasMarker = hasCompletionMarker(sanitizedOutput);
+          const hasMarker = /Resume this session with:/i.test(sanitizedOutput);
           if (hasDelimited || hasJson || hasMarker) {
             finish(true);
           } else if (sanitizedOutput.trim()) {
@@ -1064,10 +1118,9 @@ export class AgentManager {
               schedulePromptFallback(2_000);
               return;
             }
-            const patterns = getCliReadyPatterns(this.workerCLI);
             const accumulator = sanitizedOutput.slice(-READY_ACCUMULATOR_MAX_CHARS);
-            const cliReady = patterns.some((p) => p.test(accumulator));
-            const waitedLongEnough = Date.now() - cliLaunchedAt > (expectJson ? 12_000 : 30_000);
+            const cliReady = isCliReady(this.workerCLI, accumulator, Date.now() - cliLaunchedAt);
+            const waitedLongEnough = Date.now() - cliLaunchedAt > (expectJson ? 12_000 : 45_000);
             if (cliReady || waitedLongEnough) {
               void tryDeliverPrompt('fallback-timer');
             } else {
@@ -1148,8 +1201,8 @@ export class AgentManager {
     }
     const patterns = getCliReadyPatterns(this.workerCLI);
     const accumulator = sanitizeTerminalOutput(agent.terminalOutput).slice(-READY_ACCUMULATOR_MAX_CHARS);
-    const cliReady = patterns.some((p) => p.test(accumulator));
-    const waitedLongEnough = Date.now() - rt.cliLaunchedAt > 30_000;
+    const cliReady = isCliReady(this.workerCLI, accumulator, Date.now() - rt.cliLaunchedAt);
+    const waitedLongEnough = Date.now() - rt.cliLaunchedAt > 45_000;
     if (!cliReady && !waitedLongEnough) {
       rt.promptTimer = setTimeout(() => {
         rt.promptTimer = null;
@@ -1242,12 +1295,12 @@ export class AgentManager {
     const sanitizedTail = sanitizeTerminalOutput(
       agent.terminalOutput.slice(-80_000),
     );
-    const hasMarker = hasCompletionMarker(sanitizedTail);
+    const hasMarker = hasAgentCompletionSignal(agent.role.type, sanitizedTail);
 
     if (hasMarker && quietMs >= COMPLETION_QUIET_AFTER_MARKER_MS) {
       console.log(
         `AgentManager[${agent.label || agent.role.name}]:`,
-        `completion marker + quiet ${quietMs}ms — sending /exit`,
+        `role completion signal + quiet ${quietMs}ms — sending /exit`,
       );
       this.stopCompletionPolling(agentId);
       this.requestCliExit(agentId);
@@ -1257,7 +1310,7 @@ export class AgentManager {
     // Heuristic fallback: if the agent has been completely silent for a long
     // time AND has been working for at least 60s, assume it's sitting at a
     // prompt and tell it to quit.
-    if (quietMs >= COMPLETION_IDLE_TIMEOUT_MS && sinceDelivery > 60_000) {
+    if (quietMs >= COMPLETION_IDLE_TIMEOUT_MS && sinceDelivery > COMPLETION_MIN_WORK_MS) {
       console.log(
         `AgentManager[${agent.label || agent.role.name}]:`,
         `idle ${quietMs}ms after ${sinceDelivery}ms of work — sending /exit`,
@@ -1351,16 +1404,11 @@ export class AgentManager {
       }
     } else if (rt.phase === 'launching_cli') {
       const sinceLaunch = Date.now() - rt.cliLaunchedAt;
-      // Give the CLI at least 1.5s after launch so we don't misinterpret
-      // the CLI command echo itself as a "ready" prompt.
-      if (sinceLaunch > 1500) {
-        const patterns = getCliReadyPatterns(this.workerCLI);
-        if (patterns.some((p) => p.test(rt.outputAccumulator))) {
-          console.log(
-            `AgentManager[${agent.label || agent.role.name}]: CLI ready detected — delivering prompt early`,
-          );
-          void this.tryDeliverPrompt(agentId, 'cli-ready');
-        }
+      if (isCliReady(this.workerCLI, rt.outputAccumulator, sinceLaunch)) {
+        console.log(
+          `AgentManager[${agent.label || agent.role.name}]: CLI ready detected — delivering prompt early`,
+        );
+        void this.tryDeliverPrompt(agentId, 'cli-ready');
       }
     }
 
@@ -1508,9 +1556,13 @@ Restrictions: ${role.restrictions.join(', ')}
         break;
     }
 
-    // `set +e` keeps the shell from exiting if the CLI returns non-zero.
+    // `set +e` keeps bash from exiting if the CLI returns non-zero (Unix only).
     // Trailing \r submits the command.
-    return `set +e 2>/dev/null; ${parts.join(' ')}\r`;
+    const cliCmd = parts.join(' ');
+    if (isWindowsHost()) {
+      return `${cliCmd}\r`;
+    }
+    return `set +e 2>/dev/null; ${cliCmd}\r`;
   }
 
   // -----------------------------------------------------------------------

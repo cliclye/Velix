@@ -46,6 +46,13 @@ import {
   buildAutomaticMindMapConnections,
   buildDefaultWorkerCLIAvailability,
 } from './swarmPanelModel';
+import {
+  MAX_IMAGES,
+  prepareSwarmGoalWithImages,
+  readImageFile,
+  type SwarmGoalImage,
+} from '../../services/swarm/swarmAttachments';
+import { deriveSwarmActivity } from './swarmActivity';
 import './SwarmPanel.css';
 
 interface SwarmPanelProps {
@@ -64,9 +71,11 @@ export const SwarmPanel: React.FC<SwarmPanelProps> = ({
   theme,
   workspacePath,
   hasApiKey,
+  apiProvider,
 }) => {
   const managerRef = useRef<AgentManager | null>(null);
   const syncIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const imageInputRef = useRef<HTMLInputElement | null>(null);
   /** Prevents overlapping coordinator syncs when the 45s interval fires with a stale `isSyncing` closure. */
   const coordinatorSyncInFlightRef = useRef(false);
   /** Abort controller for the current swarm run — allows mid-flight cancellation. */
@@ -74,6 +83,8 @@ export const SwarmPanel: React.FC<SwarmPanelProps> = ({
 
   const [agents, setAgents] = useState<Agent[]>([]);
   const [goal, setGoal] = useState('');
+  const [goalImages, setGoalImages] = useState<SwarmGoalImage[]>([]);
+  const [isPreparingImages, setIsPreparingImages] = useState(false);
   const [activeGoal, setActiveGoal] = useState('');
   const [roleCounts, setRoleCounts] = useState<RoleCounts>(DEFAULT_ROLE_COUNTS);
   const [workerCLI, setWorkerCLI] = useState<WorkerCLI>(() => {
@@ -344,6 +355,45 @@ export const SwarmPanel: React.FC<SwarmPanelProps> = ({
     });
   }, []);
 
+  const addGoalImages = useCallback(async (files: FileList | File[]) => {
+    const list = Array.from(files);
+    if (list.length === 0) return;
+
+    try {
+      const next = [...goalImages];
+      for (const file of list) {
+        if (next.length >= MAX_IMAGES) break;
+        const image = await readImageFile(file);
+        next.push(image);
+      }
+      setGoalImages(next);
+      setError(null);
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      setError(message);
+    }
+  }, [goalImages]);
+
+  const removeGoalImage = useCallback((id: string) => {
+    setGoalImages((prev) => prev.filter((image) => image.id !== id));
+  }, []);
+
+  const handleGoalPaste = useCallback((event: React.ClipboardEvent<HTMLTextAreaElement>) => {
+    const items = event.clipboardData?.items;
+    if (!items) return;
+
+    const imageFiles: File[] = [];
+    for (const item of items) {
+      if (item.type.startsWith('image/')) {
+        const file = item.getAsFile();
+        if (file) imageFiles.push(file);
+      }
+    }
+    if (imageFiles.length === 0) return;
+    event.preventDefault();
+    void addGoalImages(imageFiles);
+  }, [addGoalImages]);
+
   const handleLaunch = useCallback(async () => {
     const manager = managerRef.current;
     const trimmedGoal = goal.trim();
@@ -362,8 +412,8 @@ export const SwarmPanel: React.FC<SwarmPanelProps> = ({
       setError(`Swarm PTY layer is not ready: ${msg}`);
       return;
     }
-    if (!trimmedGoal) {
-      setError('Describe the goal for the coordinator first.');
+    if (!trimmedGoal && goalImages.length === 0) {
+      setError('Describe the goal for the coordinator or attach at least one reference image.');
       return;
     }
     if (rolesToLaunch.length < MIN_AGENTS) {
@@ -385,7 +435,32 @@ export const SwarmPanel: React.FC<SwarmPanelProps> = ({
     setStatusLabel('Coordinator Planning');
     setCoordinatorPlan(null);
     setLastSync(null);
-    setActiveGoal(trimmedGoal);
+
+    let effectiveGoal = trimmedGoal;
+    try {
+      if (goalImages.length > 0) {
+        setIsPreparingImages(true);
+        setStatusLabel('Processing Images');
+        appendLog('plan', `Saving ${goalImages.length} reference image${goalImages.length === 1 ? '' : 's'} for the swarm…`);
+        effectiveGoal = await prepareSwarmGoalWithImages(workspacePath, trimmedGoal, goalImages, {
+          hasApiKey,
+          apiProvider,
+        });
+        appendLog('plan', 'Reference images attached to the swarm goal.');
+      }
+    } catch (imageErr) {
+      const message = imageErr instanceof Error ? imageErr.message : String(imageErr);
+      setError(`Failed to prepare images: ${message}`);
+      setStatusLabel('Launch Error');
+      setIsLaunching(false);
+      setIsPreparingImages(false);
+      return;
+    } finally {
+      setIsPreparingImages(false);
+    }
+
+    setStatusLabel('Coordinator Planning');
+    setActiveGoal(effectiveGoal);
     appendLog('plan', `Coordinator planning ${rolesToLaunch.length} owned work lanes with ${getWorkerCLIOptions().find((option) => option.id === workerCLI)?.name || workerCLI}.${maxMode ? ' MAX MODE enabled.' : ''}`);
 
     try {
@@ -405,7 +480,7 @@ export const SwarmPanel: React.FC<SwarmPanelProps> = ({
         }),
       };
 
-      const rawPlan = await claudeCoordinator.createLaunchPlan(trimmedGoal, workspacePath, rolesToLaunch, coordinatorConfig, maxMode);
+      const rawPlan = await claudeCoordinator.createLaunchPlan(effectiveGoal, workspacePath, rolesToLaunch, coordinatorConfig, maxMode);
       const plan = {
         ...rawPlan,
         assignments: applyManualConnectionsToAssignments(rawPlan.assignments, manualConnections),
@@ -426,7 +501,7 @@ export const SwarmPanel: React.FC<SwarmPanelProps> = ({
       await runSwarmLaunch({
         manager,
         plan,
-        trimmedGoal,
+        trimmedGoal: effectiveGoal,
         coordinatorConfig,
         selectedCliName,
         maxMode,
@@ -437,6 +512,7 @@ export const SwarmPanel: React.FC<SwarmPanelProps> = ({
       });
 
       refreshAgents();
+      setGoalImages([]);
     } catch (err) {
       if (err instanceof DOMException && err.name === 'AbortError') {
         // User stopped the swarm — agents already terminated by handleStopSwarm
@@ -460,7 +536,10 @@ export const SwarmPanel: React.FC<SwarmPanelProps> = ({
     }
   }, [
     appendLog,
+    apiProvider,
     goal,
+    goalImages,
+    hasApiKey,
     isLaunching,
     maxMode,
     refreshAgents,
@@ -556,14 +635,26 @@ export const SwarmPanel: React.FC<SwarmPanelProps> = ({
   );
   const canLaunch = useMemo(() => Boolean(
     hasApiKey &&
-    goal.trim() &&
+    (goal.trim() || goalImages.length > 0) &&
     workspacePath &&
     rolesReady &&
     !isCheckingWorkerCLI &&
     selectedWorkerCLIStatus?.available &&
     swarmPtyReady &&
-    !isLaunching,
-  ), [hasApiKey, goal, workspacePath, rolesReady, isCheckingWorkerCLI, selectedWorkerCLIStatus, swarmPtyReady, isLaunching]);
+    !isLaunching &&
+    !isPreparingImages,
+  ), [hasApiKey, goal, goalImages.length, workspacePath, rolesReady, isCheckingWorkerCLI, selectedWorkerCLIStatus, swarmPtyReady, isLaunching, isPreparingImages]);
+  const swarmActivity = useMemo(
+    () => deriveSwarmActivity({
+      statusLabel,
+      isLaunching,
+      isSyncing,
+      runningCount,
+      agentCount: agents.length,
+      hasError: Boolean(error),
+    }),
+    [statusLabel, isLaunching, isSyncing, runningCount, agents.length, error],
+  );
   const workspaceName = useMemo(() => workspacePath ? getWorkspaceName(workspacePath) : 'workspace', [workspacePath]);
   const previewAssignments = useMemo(() => buildPreviewAssignments(rolesToLaunch), [rolesToLaunch]);
   const boardAssignmentsBase = useMemo(
@@ -694,9 +785,19 @@ export const SwarmPanel: React.FC<SwarmPanelProps> = ({
     <div className={`swarm-panel ${theme}`}>
       <div className="swarm-header">
         <div className="swarm-header-copy">
-          <h2>Agents</h2>
-          <span>
-            {workspaceName} · {statusLabel} · {runningCount}/{Math.max(agents.length, 1)} live
+          <div className="swarm-header-title-row">
+            <h2>Agents</h2>
+            <span
+              className={`swarm-activity-badge swarm-activity-${swarmActivity.state}${swarmActivity.isLive ? ' is-live' : ''}`}
+              role="status"
+              aria-live="polite"
+            >
+              <span className="swarm-activity-dot" aria-hidden />
+              {swarmActivity.label}
+            </span>
+          </div>
+          <span className="swarm-header-subtitle">
+            {workspaceName} · {swarmActivity.detail} · {runningCount}/{Math.max(agents.length, 1)} live
           </span>
         </div>
         <div className="swarm-header-actions">
@@ -761,8 +862,8 @@ export const SwarmPanel: React.FC<SwarmPanelProps> = ({
           <SwarmMindMap
             nodes={mindMapNodes}
             connections={mindMapConnections}
-            coordinatorStatus={statusLabel}
-            isActive={isLaunching || isSyncing}
+            coordinatorStatus={swarmActivity.label}
+            isActive={swarmActivity.isLive}
             onAgentClick={(nodeId) => setSelectedAgentId((prev) => prev === nodeId ? null : nodeId)}
             selectedNodeId={selectedAgentId}
             onNodeMove={handleMindMapNodeMove}
@@ -878,13 +979,61 @@ export const SwarmPanel: React.FC<SwarmPanelProps> = ({
         <div className="swarm-scroll">
         <div className="swarm-planner">
           {/* Goal input */}
-          <div className="swarm-section">
+          <div className="swarm-section swarm-goal-section">
+            <div className="swarm-goal-toolbar">
+              <span className="swarm-goal-toolbar-label">Swarm goal</span>
+              <div className="swarm-goal-toolbar-actions">
+                <input
+                  ref={imageInputRef}
+                  type="file"
+                  accept="image/*"
+                  multiple
+                  className="swarm-goal-image-input"
+                  onChange={(e) => {
+                    if (e.target.files) void addGoalImages(e.target.files);
+                    e.target.value = '';
+                  }}
+                />
+                <button
+                  type="button"
+                  className="swarm-secondary-btn swarm-goal-attach-btn"
+                  onClick={() => imageInputRef.current?.click()}
+                  disabled={isLaunching || goalImages.length >= MAX_IMAGES}
+                  title={`Attach reference images (max ${MAX_IMAGES})`}
+                >
+                  {isPreparingImages ? 'Processing…' : 'Attach images'}
+                </button>
+                {goalImages.length > 0 && (
+                  <span className="swarm-goal-image-count">{goalImages.length}/{MAX_IMAGES}</span>
+                )}
+              </div>
+            </div>
             <textarea
               className="swarm-goal-input"
               value={goal}
               onChange={(e) => setGoal(e.target.value)}
-              placeholder="Describe what you want the swarm to build, fix, or refactor…"
+              onPaste={handleGoalPaste}
+              placeholder="Describe what you want the swarm to build, fix, or refactor… You can also paste or attach reference images."
             />
+            {goalImages.length > 0 && (
+              <div className="swarm-goal-images" aria-label="Attached reference images">
+                {goalImages.map((image) => (
+                  <div key={image.id} className="swarm-goal-image-chip">
+                    <img src={image.dataUrl} alt={image.name} className="swarm-goal-image-thumb" />
+                    <span className="swarm-goal-image-name" title={image.name}>{image.name}</span>
+                    <button
+                      type="button"
+                      className="swarm-goal-image-remove"
+                      onClick={() => removeGoalImage(image.id)}
+                      disabled={isLaunching}
+                      aria-label={`Remove ${image.name}`}
+                    >
+                      ×
+                    </button>
+                  </div>
+                ))}
+              </div>
+            )}
           </div>
 
           {/* Compact role steppers */}
@@ -1046,20 +1195,28 @@ export const SwarmPanel: React.FC<SwarmPanelProps> = ({
               </button>
             ) : (
               <button className="swarm-primary-btn" onClick={handleLaunch} disabled={!canLaunch}>
-                {`Launch ${workerCount}-Worker Swarm${maxMode ? ' (MAX)' : ''}`}
+                {isPreparingImages
+                  ? 'Preparing images…'
+                  : `Launch ${workerCount}-Worker Swarm${maxMode ? ' (MAX)' : ''}`}
               </button>
             )}
           </div>
         </div>
 
+        <div className={`swarm-status-strip swarm-status-${swarmActivity.state}${swarmActivity.isLive ? ' is-live' : ''}`} role="status" aria-live="polite">
+          <div className="swarm-status-strip-main">
+            <span className={`swarm-activity-badge swarm-activity-${swarmActivity.state}${swarmActivity.isLive ? ' is-live' : ''}`}>
+              <span className="swarm-activity-dot" aria-hidden />
+              {swarmActivity.label}
+            </span>
+            <span className="swarm-status-detail">{swarmActivity.detail}</span>
+          </div>
+          <span className="swarm-status-metrics">{runningCount} active · {agents.length} workers</span>
+        </div>
+
         {/* Coordination Board - visible after plan exists or as preview */}
         {(coordinatorPlan || agents.length > 0) && (
           <>
-            <div className="swarm-status-strip">
-              <span>{statusLabel}</span>
-              <span>{runningCount} active · {agents.length} workers</span>
-            </div>
-
             <div className="swarm-coordinator-board">
               <div className="swarm-coordinator-card swarm-board-card">
                 <div className="swarm-section-head">

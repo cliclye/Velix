@@ -153,6 +153,171 @@
   box-shadow: 0 0 0 2px var(--glow-primary), 0 4px 12px rgba(0, 0, 0, 0.04);
 }
 
+.swarm-goal-section {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.swarm-goal-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.swarm-goal-toolbar-label {
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--text-secondary);
+}
+
+.swarm-goal-toolbar-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.swarm-goal-image-input {
+  display: none;
+}
+
+.swarm-goal-attach-btn {
+  padding: 4px 10px;
+  font-size: 11px;
+}
+
+.swarm-goal-image-count {
+  font-size: 10px;
+  font-family: var(--font-mono);
+  color: var(--text-muted);
+}
+
+.swarm-goal-images {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.swarm-goal-image-chip {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 8px 4px 4px;
+  border-radius: 10px;
+  border: 1px solid var(--border-default);
+  background: var(--bg-secondary);
+  max-width: 100%;
+}
+
+.swarm-goal-image-thumb {
+  width: 32px;
+  height: 32px;
+  object-fit: cover;
+  border-radius: 6px;
+  flex-shrink: 0;
+}
+
+.swarm-goal-image-name {
+  font-size: 10px;
+  color: var(--text-secondary);
+  max-width: 120px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.swarm-goal-image-remove {
+  background: none;
+  border: none;
+  color: var(--text-muted);
+  cursor: pointer;
+  font-size: 14px;
+  line-height: 1;
+  padding: 0 2px;
+}
+
+.swarm-goal-image-remove:hover {
+  color: var(--accent-red);
+}
+
+.swarm-header-title-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.swarm-header-subtitle {
+  display: block;
+  margin-top: 2px;
+}
+
+.swarm-activity-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 3px 10px 3px 8px;
+  border-radius: 999px;
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  border: 1px solid var(--border-default);
+  background: var(--bg-secondary);
+  color: var(--text-secondary);
+}
+
+.swarm-activity-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--text-muted);
+  flex-shrink: 0;
+}
+
+.swarm-activity-badge.is-live .swarm-activity-dot {
+  background: var(--accent-primary);
+  box-shadow: 0 0 0 0 color-mix(in srgb, var(--accent-primary) 45%, transparent);
+  animation: swarm-activity-pulse 1.6s ease-in-out infinite;
+}
+
+.swarm-activity-planning,
+.swarm-activity-running,
+.swarm-activity-syncing {
+  border-color: color-mix(in srgb, var(--accent-primary) 35%, var(--border-default));
+  color: var(--accent-primary);
+}
+
+.swarm-activity-complete {
+  border-color: color-mix(in srgb, var(--accent-green, #22c55e) 35%, var(--border-default));
+  color: var(--accent-green, #22c55e);
+}
+
+.swarm-activity-complete .swarm-activity-dot {
+  background: var(--accent-green, #22c55e);
+}
+
+.swarm-activity-error {
+  border-color: color-mix(in srgb, var(--accent-red) 35%, var(--border-default));
+  color: var(--accent-red);
+}
+
+.swarm-activity-error .swarm-activity-dot {
+  background: var(--accent-red);
+}
+
+.swarm-activity-stopped .swarm-activity-dot {
+  background: var(--text-muted);
+}
+
+@keyframes swarm-activity-pulse {
+  0%, 100% {
+    box-shadow: 0 0 0 0 color-mix(in srgb, var(--accent-primary) 45%, transparent);
+  }
+  50% {
+    box-shadow: 0 0 0 5px color-mix(in srgb, var(--accent-primary) 0%, transparent);
+  }
+}
+
 /* Compact role row */
 .swarm-role-row {
   display: flex;
@@ -716,6 +881,34 @@
   font-size: 11px;
   font-family: var(--font-mono);
   flex-shrink: 0;
+}
+
+.swarm-status-strip.is-live {
+  background: color-mix(in srgb, var(--accent-primary) 6%, var(--bg-secondary));
+  border-bottom-color: color-mix(in srgb, var(--accent-primary) 22%, var(--border-default));
+}
+
+.swarm-status-strip-main {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+}
+
+.swarm-status-detail {
+  color: var(--text-muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.swarm-status-metrics {
+  flex-shrink: 0;
+  color: var(--text-secondary);
+}
+
+.swarm-status-error {
+  background: color-mix(in srgb, var(--accent-red) 8%, var(--bg-secondary));
 }
 
 .swarm-coordinator-board {

@@ -1703,6 +1703,7 @@ Working directory: ${currentDir || "unknown"}`;
                     theme={theme}
                     workspacePath={currentDir}
                     hasApiKey={!!aiConfig?.apiKey}
+                    apiProvider={aiConfig?.provider}
                   />
                 </div>
               )}

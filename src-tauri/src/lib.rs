@@ -9,6 +9,8 @@ use std::sync::{Arc, Mutex, OnceLock};
 use std::thread;
 use tauri::{AppHandle, Emitter, Manager, State};
 
+mod platform;
+
 /// Cached list of directories to search for CLI binaries.
 /// Built once by spawning login shells; subsequent calls read from here.
 static SEARCH_DIRS_CACHE: OnceLock<Vec<String>> = OnceLock::new();
@@ -23,79 +25,7 @@ fn cli_path_cache() -> &'static Mutex<HashMap<String, Result<String, ()>>> {
 /// Build (and cache) the ordered list of directories to scan for binaries.
 fn get_search_dirs() -> Vec<String> {
     SEARCH_DIRS_CACHE
-        .get_or_init(|| {
-            let home = dirs_or_home();
-            let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/zsh".to_string());
-
-            let login_path = Command::new(&shell)
-                .args(["-l", "-c", "echo $PATH"])
-                .env("HOME", &home)
-                .output()
-                .ok()
-                .and_then(|o| String::from_utf8(o.stdout).ok())
-                .map(|s| s.trim().to_string())
-                .filter(|s| !s.is_empty());
-
-            let interactive_path = Command::new(&shell)
-                .args(["-i", "-l", "-c", "echo $PATH"])
-                .env("HOME", &home)
-                .output()
-                .ok()
-                .and_then(|o| String::from_utf8(o.stdout).ok())
-                .map(|s| s.trim().to_string())
-                .filter(|s| !s.is_empty());
-
-            let mut dirs: Vec<String> = Vec::new();
-            for raw in [login_path, interactive_path].into_iter().flatten() {
-                for dir in raw.split(':') {
-                    let d = dir.trim().to_string();
-                    if !d.is_empty() && !dirs.contains(&d) {
-                        dirs.push(d);
-                    }
-                }
-            }
-
-            let extra_dirs = vec![
-                "/opt/homebrew/bin".to_string(),
-                "/usr/local/bin".to_string(),
-                "/usr/bin".to_string(),
-                format!("{}/.npm-global/bin", home),
-                format!("{}/.yarn/bin", home),
-                format!("{}/.cargo/bin", home),
-                format!("{}/.bun/bin", home),
-            ];
-            for d in extra_dirs {
-                if !dirs.contains(&d) {
-                    dirs.push(d);
-                }
-            }
-
-            let nvm_versions_dir = format!("{}/.nvm/versions/node", home);
-            if let Ok(entries) = std::fs::read_dir(&nvm_versions_dir) {
-                let mut versions: Vec<String> = entries
-                    .flatten()
-                    .filter(|e| e.path().is_dir())
-                    .map(|e| e.file_name().to_string_lossy().to_string())
-                    .collect();
-                versions.sort_by(|a, b| {
-                    let parse = |s: &str| -> Vec<u64> {
-                        s.trim_start_matches('v')
-                            .split('.')
-                            .filter_map(|p| p.parse().ok())
-                            .collect()
-                    };
-                    parse(b).cmp(&parse(a))
-                });
-                for version in &versions {
-                    let bin = format!("{}/{}/bin", nvm_versions_dir, version);
-                    if !dirs.contains(&bin) {
-                        dirs.push(bin);
-                    }
-                }
-            }
-
-            dirs
-        })
+        .get_or_init(platform::cli_search_dirs)
         .clone()
 }
 
@@ -236,16 +166,19 @@ static LOGIN_SHELL_PATH: OnceLock<String> = OnceLock::new();
 fn get_login_shell_path() -> String {
     LOGIN_SHELL_PATH
         .get_or_init(|| {
-            let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/zsh".to_string());
-            std::process::Command::new(&shell)
-                .args(["-l", "-c", "echo $PATH"])
-                .env("HOME", dirs_or_home())
-                .output()
-                .ok()
-                .and_then(|o| String::from_utf8(o.stdout).ok())
-                .map(|s| s.trim().to_string())
-                .filter(|s| !s.is_empty())
-                .unwrap_or_else(|| std::env::var("PATH").unwrap_or_default())
+            let entries = platform::system_path_entries();
+            if entries.is_empty() {
+                std::env::var("PATH").unwrap_or_default()
+            } else {
+                #[cfg(windows)]
+                {
+                    entries.join(";")
+                }
+                #[cfg(not(windows))]
+                {
+                    entries.join(":")
+                }
+            }
         })
         .clone()
 }
@@ -274,24 +207,17 @@ fn pty_create(
         .openpty(size)
         .map_err(|e| format!("Failed to open PTY: {}", e))?;
 
-    // Get the shell path - use user's default shell or fallback to zsh
-    let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/zsh".to_string());
-
-    // Get the full PATH from the cached login shell environment.
+    let shell = platform::default_shell();
     let full_path = get_login_shell_path();
 
     let mut cmd = CommandBuilder::new(&shell);
-    cmd.arg("-l"); // Login shell to load user's profile
+    platform::configure_pty_shell(&mut cmd);
 
     // Set working directory (frontend may pass "~" until the project path is applied)
     let working_dir = resolve_pty_cwd(cwd);
     cmd.cwd(&working_dir);
 
-    cmd.env("PATH", &full_path);
-    cmd.env("TERM", "xterm-256color");
-    cmd.env("COLORTERM", "truecolor");
-    cmd.env("LANG", "en_US.UTF-8");
-    cmd.env("HOME", dirs_or_home());
+    platform::pty_env(&mut cmd, &full_path);
 
     // Inject API keys from settings into the PTY environment
     if let Ok(settings) = state.settings.lock() {
@@ -477,23 +403,10 @@ fn execute_shell_command(
     let trimmed = command.trim();
     if trimmed == "cd" || trimmed.starts_with("cd ") {
         let target = if trimmed == "cd" {
-            dirs_or_home()
+            platform::home_dir()
         } else {
             let arg = trimmed[3..].trim();
-            let arg = arg.trim_matches('"').trim_matches('\'');
-            if arg == "~" {
-                dirs_or_home()
-            } else if arg == "-" {
-                // Just go to home for simplicity
-                dirs_or_home()
-            } else if arg.starts_with('/') {
-                arg.to_string()
-            } else if arg.starts_with("~/") {
-                let home = dirs_or_home();
-                format!("{}/{}", home, &arg[2..])
-            } else {
-                format!("{}/{}", working_dir, arg)
-            }
+            platform::resolve_cd_target(arg, &working_dir)
         };
 
         // Canonicalize the path
@@ -527,24 +440,24 @@ fn execute_shell_command(
         });
     }
 
-    // Resolve the full PATH from the user's login shell so tools installed via
-    // nvm, homebrew, etc. are visible — matches how pty_create sets up workers.
-    let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/zsh".to_string());
-    let full_path = Command::new(&shell)
-        .args(["-l", "-c", "echo $PATH"])
-        .env("HOME", dirs_or_home())
-        .output()
-        .ok()
-        .and_then(|o| String::from_utf8(o.stdout).ok())
-        .map(|s| s.trim().to_string())
-        .filter(|s| !s.is_empty())
-        .unwrap_or_else(|| std::env::var("PATH").unwrap_or_default());
+    let shell = platform::default_shell();
+    let full_path = get_login_shell_path();
 
-    // Execute via the user's shell
+    #[cfg(windows)]
     let output = Command::new(&shell)
-        .args(&["-c", command])
+        .args(["/C", command])
         .current_dir(&working_dir)
-        .env("HOME", dirs_or_home())
+        .env("USERPROFILE", platform::home_dir())
+        .env("HOME", platform::home_dir())
+        .env("PATH", &full_path)
+        .output()
+        .map_err(|e| format!("Failed to execute command: {}", e))?;
+
+    #[cfg(not(windows))]
+    let output = Command::new(&shell)
+        .args(["-c", command])
+        .current_dir(&working_dir)
+        .env("HOME", platform::home_dir())
         .env("TERM", "xterm-256color")
         .env("LANG", "en_US.UTF-8")
         .env("PATH", &full_path)
@@ -582,21 +495,18 @@ fn check_cli_available(command: String) -> Result<String, String> {
     let mut found: Option<String> = None;
 
     'outer: for dir in &dirs {
-        let candidate = Path::new(dir).join(&command);
-        if candidate.is_file() {
-            #[cfg(unix)]
-            {
-                use std::os::unix::fs::PermissionsExt;
-                if let Ok(meta) = std::fs::metadata(&candidate) {
-                    if meta.permissions().mode() & 0o111 != 0 {
-                        found = Some(candidate.to_string_lossy().to_string());
-                        break 'outer;
-                    }
-                }
-            }
-            #[cfg(not(unix))]
-            {
-                found = Some(candidate.to_string_lossy().to_string());
+        let exe_name = platform::cli_executable_name(&command);
+        let candidate = Path::new(dir).join(&exe_name);
+        if platform::is_executable(&candidate) {
+            found = Some(candidate.to_string_lossy().to_string());
+            break 'outer;
+        }
+        // Also try without .exe on Windows (e.g. claude.cmd)
+        #[cfg(windows)]
+        if !command.ends_with(".exe") {
+            let alt = Path::new(dir).join(&command);
+            if platform::is_executable(&alt) {
+                found = Some(alt.to_string_lossy().to_string());
                 break 'outer;
             }
         }
@@ -626,7 +536,7 @@ fn set_shell_cwd(cwd: &str, state: State<'_, AppState>) -> Result<(), String> {
 }
 
 fn dirs_or_home() -> String {
-    std::env::var("HOME").unwrap_or_else(|_| "/".to_string())
+    platform::home_dir()
 }
 
 /// Expand `~` / `~/...` for PTY cwd; the shell API may send `"~"` before the real path is known.
@@ -1885,27 +1795,7 @@ async fn ai_chat(
 
 /// Try to locate the `bun` executable in common paths.
 fn find_bun() -> Option<String> {
-    // Try PATH first
-    if let Ok(output) = Command::new("which").arg("bun").output() {
-        if output.status.success() {
-            let path = String::from_utf8_lossy(&output.stdout).trim().to_string();
-            if !path.is_empty() {
-                return Some(path);
-            }
-        }
-    }
-    // Common macOS / Linux locations
-    let candidates = ["/usr/local/bin/bun", "/opt/homebrew/bin/bun"];
-    let home = std::env::var("HOME").unwrap_or_default();
-    let home_bun = format!("{}/.bun/bin/bun", home);
-    let mut all: Vec<&str> = candidates.to_vec();
-    all.push(home_bun.as_str());
-    for path in all {
-        if Path::new(path).exists() {
-            return Some(path.to_string());
-        }
-    }
-    None
+    platform::find_bun()
 }
 
 /// Try to find the velixcode/packages/engine directory.

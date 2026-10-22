@@ -96,6 +96,17 @@ export async function readTextFile(path: string): Promise<string> {
   return unsupportedRuntime("readTextFile");
 }
 
+export async function writeBinaryFile(
+  path: string,
+  data: Uint8Array,
+): Promise<void> {
+  if (isTauriRuntime()) {
+    const { writeFile } = await tauriFs();
+    return writeFile(path, data);
+  }
+  return unsupportedRuntime("writeBinaryFile");
+}
+
 export async function writeTextFile(
   path: string,
   contents: string,
