@@ -14,6 +14,7 @@ export interface AIProvider {
     description?: string;
     apiKeySteps?: string[];
     apiKeyUrl?: string;
+    isFree?: boolean;
 }
 
 export const AI_PROVIDERS: AIProvider[] = PROVIDER_CATALOG.map((p) => ({

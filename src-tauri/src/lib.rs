@@ -1,3 +1,6 @@
+mod agent;
+
+use agent::{AgentEvent, AgentRunner, AgentSpawnRequest, EventSink};
 use portable_pty::{native_pty_system, ChildKiller, CommandBuilder, PtyPair, PtySize};
 use serde::Serialize;
 use std::collections::HashMap;
@@ -40,7 +43,9 @@ struct AppSettings {
 struct PtySession {
     pair: PtyPair,
     writer: Box<dyn IoWrite + Send>,
-    child_killer: Box<dyn ChildKiller + Send + Sync>,
+    /// Lets `pty_kill` actually terminate the shell (dropping the session alone does not:
+    /// the reader thread keeps a dup of the master fd open, so no SIGHUP is delivered).
+    killer: Box<dyn ChildKiller + Send + Sync>,
 }
 
 // Simple in-memory storage for API keys and shell state
@@ -51,6 +56,8 @@ struct AppState {
     app_dir: Mutex<Option<PathBuf>>,
     /// Handle to the Velix AI engine child process
     velix_engine_process: Mutex<Option<Child>>,
+    /// Swarm worker processes (one headless CLI run each).
+    agents: Arc<AgentRunner>,
 }
 
 impl AppState {
@@ -77,6 +84,7 @@ impl AppState {
             pty_sessions: Mutex::new(HashMap::new()),
             app_dir: Mutex::new(app_dir),
             velix_engine_process: Mutex::new(None),
+            agents: Arc::new(AgentRunner::new()),
         }
     }
 
@@ -251,17 +259,14 @@ fn pty_create(
         .take_writer()
         .map_err(|e| format!("Failed to take writer: {}", e))?;
 
-    let child_killer = child.clone_killer();
+    let killer = child.clone_killer();
+    let session = Arc::new(Mutex::new(PtySession { pair, writer, killer }));
 
-    // Store the session
-    let session = Arc::new(Mutex::new(PtySession {
-        pair,
-        writer,
-        child_killer,
-    }));
-
+    // Store the session — replace any existing session with the same id so reader
+    // threads cannot emit duplicate events for a recycled session id.
     {
         let mut sessions = state.pty_sessions.lock().map_err(|e| e.to_string())?;
+        sessions.remove(&session_id);
         sessions.insert(session_id.clone(), session);
     }
 
@@ -362,17 +367,21 @@ fn pty_resize(
 
 #[tauri::command]
 fn pty_kill(session_id: String, state: State<'_, AppState>) -> Result<(), String> {
-    let session = {
+    let removed = {
         let mut sessions = state.pty_sessions.lock().map_err(|e| e.to_string())?;
         sessions.remove(&session_id)
     };
 
-    let session = session.ok_or_else(|| format!("PTY session not found: {}", session_id))?;
-    let mut session_guard = session.lock().map_err(|e| e.to_string())?;
-    session_guard
-        .child_killer
-        .kill()
-        .map_err(|e| format!("Failed to kill PTY session {}: {}", session_id, e))
+    match removed {
+        Some(session) => {
+            if let Ok(mut guard) = session.lock() {
+                // Best effort: the process may already be gone.
+                let _ = guard.killer.kill();
+            }
+            Ok(())
+        }
+        None => Err(format!("PTY session not found: {}", session_id)),
+    }
 }
 
 // ==================== Legacy Shell Commands (for compatibility) ====================
@@ -476,48 +485,112 @@ fn execute_shell_command(
     })
 }
 
+fn is_executable_file(path: &Path) -> bool {
+    platform::is_executable(path)
+}
+
+/// File names to try for a CLI in each search dir (Windows npm shims are `.cmd`).
+fn cli_candidate_names(command: &str) -> Vec<String> {
+    let mut names = vec![platform::cli_executable_name(command)];
+    #[cfg(windows)]
+    {
+        names.push(format!("{}.cmd", command));
+        names.push(command.to_string());
+    }
+    names.dedup();
+    names
+}
+
 /// Locate a CLI binary using the user's full login-shell PATH, then fall back
 /// to well-known installation directories (nvm, homebrew, npm-global, cargo).
-/// Results are cached so repeated calls (e.g. reopening the Swarm panel) are instant.
-#[tauri::command]
-fn check_cli_available(command: String) -> Result<String, String> {
-    // Fast path: return cached result if available.
-    if let Ok(cache) = cli_path_cache().lock() {
-        if let Some(cached) = cache.get(&command) {
-            return cached
-                .clone()
-                .map_err(|_| format!("{} not found in login-shell PATH or common install locations", command));
-        }
+/// Hits are cached; misses are NOT, so installing a CLI while Velix is open works
+/// without a restart.
+fn resolve_cli(command: &str) -> Option<String> {
+    // Explicit path: just verify it.
+    if command.contains('/') || command.contains('\\') {
+        return is_executable_file(Path::new(command)).then(|| command.to_string());
     }
 
-    // Slow path (first call only): get ordered search dirs, then scan.
-    let dirs = get_search_dirs();
-    let mut found: Option<String> = None;
-
-    'outer: for dir in &dirs {
-        let exe_name = platform::cli_executable_name(&command);
-        let candidate = Path::new(dir).join(&exe_name);
-        if platform::is_executable(&candidate) {
-            found = Some(candidate.to_string_lossy().to_string());
-            break 'outer;
-        }
-        // Also try without .exe on Windows (e.g. claude.cmd)
-        #[cfg(windows)]
-        if !command.ends_with(".exe") {
-            let alt = Path::new(dir).join(&command);
-            if platform::is_executable(&alt) {
-                found = Some(alt.to_string_lossy().to_string());
-                break 'outer;
+    if let Ok(cache) = cli_path_cache().lock() {
+        if let Some(Ok(path)) = cache.get(command) {
+            if is_executable_file(Path::new(path)) {
+                return Some(path.clone());
             }
         }
     }
 
-    // Store result in cache (both hits and misses).
-    if let Ok(mut cache) = cli_path_cache().lock() {
-        cache.insert(command.clone(), found.clone().ok_or(()));
-    }
+    let names = cli_candidate_names(command);
+    let found = get_search_dirs()
+        .iter()
+        .flat_map(|dir| names.iter().map(move |name| Path::new(dir).join(name)))
+        .find(|candidate| is_executable_file(candidate))
+        .map(|p| p.to_string_lossy().to_string());
 
-    found.ok_or_else(|| format!("{} not found in login-shell PATH or common install locations", command))
+    if let Some(path) = &found {
+        if let Ok(mut cache) = cli_path_cache().lock() {
+            cache.insert(command.to_string(), Ok(path.clone()));
+        }
+    }
+    found
+}
+
+// `async` runs this off the main thread: the first call probes the login shell, which can
+// take seconds with a heavy ~/.zshrc and must not freeze the UI.
+#[tauri::command(async)]
+fn check_cli_available(command: String) -> Result<String, String> {
+    resolve_cli(&command).ok_or_else(|| {
+        format!(
+            "{} not found in login-shell PATH or common install locations",
+            command
+        )
+    })
+}
+
+// ==================== Swarm worker processes ====================
+
+/// Start one headless worker CLI. Output and exit are reported via `agent-event`.
+/// (`async`: resolving the CLI may probe the login shell; keep that off the main thread.)
+#[tauri::command(async)]
+fn agent_spawn(
+    mut request: AgentSpawnRequest,
+    app: AppHandle,
+    state: State<'_, AppState>,
+) -> Result<String, String> {
+    let resolved = resolve_cli(&request.program).ok_or_else(|| {
+        format!(
+            "`{}` was not found. Install it or check that it is on your login-shell PATH.",
+            request.program
+        )
+    })?;
+    request.program = resolved.clone();
+    request.cwd = resolve_pty_cwd(Some(request.cwd.clone()));
+
+    let app_handle = app.clone();
+    let sink: EventSink = Arc::new(move |event: AgentEvent| {
+        let _ = app_handle.emit("agent-event", event);
+    });
+
+    state
+        .agents
+        .spawn(request, Some(get_login_shell_path()), sink)?;
+    Ok(resolved)
+}
+
+/// Terminate a worker (SIGTERM to its process group, then SIGKILL). Idempotent.
+#[tauri::command]
+fn agent_kill(run_id: String, state: State<'_, AppState>) -> bool {
+    state.agents.kill(&run_id)
+}
+
+#[tauri::command]
+fn agent_kill_all(state: State<'_, AppState>) {
+    state.agents.kill_all();
+}
+
+/// Run ids of workers that are still alive (used to reconcile UI state after a reload).
+#[tauri::command]
+fn agent_list(state: State<'_, AppState>) -> Vec<String> {
+    state.agents.active_ids()
 }
 
 #[tauri::command]
@@ -1231,6 +1304,9 @@ fn get_git_diff(repo_path: &str, file_path: &str, staged: bool) -> Result<String
     if staged {
         args.push("--cached");
     }
+    // Pathspec separator: paths from git status can begin with `-` (e.g. `--output=...`),
+    // which git would otherwise parse as options.
+    args.push("--");
     args.push(file_path);
 
     let output = Command::new("git")
@@ -1938,6 +2014,10 @@ pub fn run() {
             pty_write,
             pty_resize,
             pty_kill,
+            agent_spawn,
+            agent_kill,
+            agent_kill_all,
+            agent_list,
             ask_claude,
             ai_chat,
             read_project_source_files,
@@ -1945,6 +2025,16 @@ pub fn run() {
             stop_velix_engine,
             get_velix_engine_url
         ])
-        .run(tauri::generate_context!())
-        .expect("error while running tauri application");
+        .build(tauri::generate_context!())
+        .expect("error while building tauri application")
+        .run(|app_handle, event| {
+            if let tauri::RunEvent::Exit = event {
+                // Never leave headless workers running after the app quits.
+                if let Some(state) = app_handle.try_state::<AppState>() {
+                    state.agents.kill_all();
+                    // Give the watcher threads a moment to deliver SIGTERM/SIGKILL.
+                    std::thread::sleep(std::time::Duration::from_millis(300));
+                }
+            }
+        });
 }

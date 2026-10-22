@@ -46,20 +46,20 @@ pub fn system_path_entries() -> Vec<String> {
         let login_path = Command::new(&shell)
             .args(["-l", "-c", "echo $PATH"])
             .env("HOME", &home)
+            .stdin(std::process::Stdio::null())
             .output()
             .ok()
             .and_then(|o| String::from_utf8(o.stdout).ok())
-            .map(|s| s.trim().to_string())
-            .filter(|s| !s.is_empty());
+            .and_then(|s| last_non_empty_line(&s));
 
         let interactive_path = Command::new(&shell)
             .args(["-i", "-l", "-c", "echo $PATH"])
             .env("HOME", &home)
+            .stdin(std::process::Stdio::null())
             .output()
             .ok()
             .and_then(|o| String::from_utf8(o.stdout).ok())
-            .map(|s| s.trim().to_string())
-            .filter(|s| !s.is_empty());
+            .and_then(|s| last_non_empty_line(&s));
 
         let mut dirs: Vec<String> = Vec::new();
         for raw in [login_path, interactive_path].into_iter().flatten() {
@@ -243,6 +243,16 @@ pub fn pty_env(cmd: &mut portable_pty::CommandBuilder, full_path: &str) {
         cmd.env("COLORTERM", "truecolor");
         cmd.env("LANG", "en_US.UTF-8");
     }
+}
+
+/// rc files may print banners; the PATH we asked for is always the last non-empty line.
+fn last_non_empty_line(output: &str) -> Option<String> {
+    output
+        .lines()
+        .map(|l| l.trim())
+        .filter(|l| !l.is_empty())
+        .last()
+        .map(|l| l.to_string())
 }
 
 fn split_path_list(raw: &str) -> Vec<String> {

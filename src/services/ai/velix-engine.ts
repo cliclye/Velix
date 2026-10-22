@@ -1,12 +1,14 @@
 /**
  * VelixEngine - Direct AI provider client via Tauri IPC.
+ *
+ * All provider calls go through the Rust backend (no CORS restrictions).
  */
 
 import { invoke } from '../../platform/native';
 import { toActualModelId } from './modelCatalog';
 
 export class VelixEngine {
-  /** Map Velix model ID to actual provider model ID */
+  /** Map a Velix model id to the provider's API id (see MODEL_ID_MAP; most pass through unchanged). */
   toActualModelID(velixModelID: string): string {
     return toActualModelId(velixModelID);
   }

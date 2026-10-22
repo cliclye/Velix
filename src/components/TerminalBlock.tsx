@@ -427,6 +427,16 @@ export const TerminalBlock = forwardRef<TerminalRef, TerminalBlockProps>(({
 
   // Create PTY session
   const createPtySession = useCallback(async (rows: number, cols: number) => {
+    const oldSessionId = sessionIdRef.current;
+    if (oldSessionId) {
+      sessionIdRef.current = "";
+      try {
+        await invoke("pty_kill", { sessionId: oldSessionId });
+      } catch {
+        // Session may already be dead.
+      }
+    }
+
     const sessionId = generateSessionId();
     sessionIdRef.current = sessionId;
     // Reset tracked dims so the first onResize after session creation always sends
@@ -525,53 +535,53 @@ export const TerminalBlock = forwardRef<TerminalRef, TerminalBlockProps>(({
   }, []);
 
   const DARK_TERMINAL_THEME = useMemo(() => ({
-    background: "#0f1012",
-    foreground: "#f3f4f6",
-    cursor: "#f2f2f3",
-    cursorAccent: "#0f1012",
-    selectionBackground: "rgba(255, 255, 255, 0.14)",
+    background: "#1b1a17",
+    foreground: "#ece9e1",
+    cursor: "#6fb5aa",
+    cursorAccent: "#1b1a17",
+    selectionBackground: "rgba(111, 181, 170, 0.28)",
     selectionForeground: "#ffffff",
-    black: "#17181b",
-    red: "#8e919a",
-    green: "#cfd1d7",
-    yellow: "#b8bac1",
-    blue: "#f2f2f3",
-    magenta: "#d6d7dc",
-    cyan: "#b8bac1",
-    white: "#cfd1d7",
-    brightBlack: "#676a73",
-    brightRed: "#d6d7dc",
-    brightGreen: "#ffffff",
-    brightYellow: "#e5e7eb",
-    brightBlue: "#ffffff",
-    brightMagenta: "#e5e7eb",
-    brightCyan: "#d6d7dc",
-    brightWhite: "#ffffff",
+    black: "#34322d",
+    red: "#e0857a",
+    green: "#7bb88a",
+    yellow: "#d9a95a",
+    blue: "#7fb0d4",
+    magenta: "#b49ac9",
+    cyan: "#6ec0c6",
+    white: "#cbc7bc",
+    brightBlack: "#6f6b62",
+    brightRed: "#eba097",
+    brightGreen: "#97cba4",
+    brightYellow: "#e6c07f",
+    brightBlue: "#9cc4e2",
+    brightMagenta: "#c8b3d9",
+    brightCyan: "#8dd0d5",
+    brightWhite: "#f6f3ec",
   }), []);
 
   const LIGHT_TERMINAL_THEME = useMemo(() => ({
-    background: "#f5f5f7",
-    foreground: "#101114",
-    cursor: "#111111",
-    cursorAccent: "#f5f5f7",
-    selectionBackground: "rgba(17, 17, 17, 0.14)",
-    selectionForeground: "#050506",
-    black: "#101114",
-    red: "#3a3c42",
-    green: "#2d2e34",
-    yellow: "#4d4f58",
-    blue: "#111111",
-    magenta: "#696b74",
-    cyan: "#545660",
-    white: "#6c6f78",
-    brightBlack: "#91939c",
-    brightRed: "#545660",
-    brightGreen: "#111111",
-    brightYellow: "#2d2e34",
-    brightBlue: "#050506",
-    brightMagenta: "#3a3c42",
-    brightCyan: "#2d2e34",
-    brightWhite: "#050506",
+    background: "#fbfaf7",
+    foreground: "#2a2824",
+    cursor: "#2e6b63",
+    cursorAccent: "#fbfaf7",
+    selectionBackground: "rgba(46, 107, 99, 0.2)",
+    selectionForeground: "#1b1a17",
+    black: "#2a2824",
+    red: "#b2453a",
+    green: "#3f7d4e",
+    yellow: "#8f6a14",
+    blue: "#3b6d8f",
+    magenta: "#7a5c93",
+    cyan: "#2e7d83",
+    white: "#9c978c",
+    brightBlack: "#77726a",
+    brightRed: "#c9594d",
+    brightGreen: "#4f9460",
+    brightYellow: "#a97d1c",
+    brightBlue: "#4a82a8",
+    brightMagenta: "#93729f",
+    brightCyan: "#3b979e",
+    brightWhite: "#4b473f",
   }), []);
 
   useEffect(() => {

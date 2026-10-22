@@ -1,17 +1,15 @@
+import { invoke } from '../../platform/native';
+import { velixEngine } from '../ai/velix-engine';
+import { ProviderID, PROVIDERS } from '../ai/types';
+import { repairTruncatedJson } from './jsonRepair';
 import { workspaceService } from '../workspace';
 import { getRole } from './roleDefinitions';
-import { Agent, AgentRoleType } from './types';
+import type { AgentRoleType } from './types';
 
 export interface CoordinatorConfig {
-  cliLabel: string;
-  runPrompt: (
-    prompt: string,
-    options?: {
-      label?: string;
-      timeoutMs?: number;
-      signal?: AbortSignal;
-    },
-  ) => Promise<string>;
+  provider: ProviderID;
+  model: string;
+  apiKey: string;
 }
 
 export const SWARM_SPECIALIST_ROLE_ORDER: AgentRoleType[] = [
@@ -73,13 +71,6 @@ interface RawCoordinatorAssignment {
   successCriteria?: unknown[];
 }
 
-interface RawCoordinatorAction {
-  assignmentId?: string;
-  label?: string;
-  role?: string;
-  message?: string;
-}
-
 export interface CoordinatorAssignment {
   id: string;
   label: string;
@@ -96,50 +87,9 @@ export interface CoordinatorPlan {
   strategy: string;
   coordinatorBrief: string;
   assignments: CoordinatorAssignment[];
+  /** True when the coordinator's reply could not be parsed and a generic plan was used. */
+  usedFallback?: boolean;
 }
-
-export interface CoordinatorAction {
-  assignmentId: string;
-  message: string;
-}
-
-export interface CoordinatorSyncResult {
-  summary: string;
-  overallStatus: 'on_track' | 'needs_attention' | 'blocked';
-  nextMilestone: string;
-  actions: CoordinatorAction[];
-}
-
-const buildIdleSyncResult = (): CoordinatorSyncResult => ({
-  summary: 'Coordinator sync skipped; no CLI guidance was produced.',
-  overallStatus: 'on_track',
-  nextMilestone: 'Keep builders moving inside their lanes and send completed work through review.',
-  actions: [],
-});
-
-const evaluateReviewLocally = (
-  reviewerOutputs: Map<string, string>,
-): { verdict: 'APPROVED' | 'REVISE'; summary: string; revisionInstructions: string } => {
-  const combined = Array.from(reviewerOutputs.values()).join('\n\n');
-  const hasReviseSignal = /\b(REVISE|REQUEST CHANGES|CHANGES REQUESTED|FAILED|BLOCKER|CRITICAL)\b/i.test(combined);
-  const hasApprovedSignal = /\b(APPROVED|LGTM|GO\/NO-GO:\s*GO|GO\s+VERDICT)\b/i.test(combined);
-
-  if (hasApprovedSignal && !hasReviseSignal) {
-    return {
-      verdict: 'APPROVED',
-      summary: 'Reviewer output indicates approval.',
-      revisionInstructions: '',
-    };
-  }
-
-  return {
-    verdict: 'REVISE',
-    summary: hasReviseSignal
-      ? 'Reviewer output indicates revisions are needed.'
-      : 'Reviewer output did not contain a clear approval signal.',
-    revisionInstructions: combined.slice(-4000) || 'Reviewers did not produce actionable output. Re-verify the work and report a clear verdict.',
-  };
-};
 
 const stripJsonEnvelope = (raw: string): string => {
   const trimmed = raw.trim();
@@ -153,7 +103,7 @@ const stripJsonEnvelope = (raw: string): string => {
   if (firstBrace >= 0 && lastBrace > firstBrace) {
     return withoutFence.slice(firstBrace, lastBrace + 1);
   }
-  return withoutFence;
+  return firstBrace >= 0 ? withoutFence.slice(firstBrace) : withoutFence;
 };
 
 const sanitizeId = (value: string): string =>
@@ -193,11 +143,19 @@ const normalizeRoleType = (value: string): AgentRoleType | null => {
   return aliases[normalized] || null;
 };
 
-const parseObjectResponse = <T,>(raw: string): T | null => {
+export const parseObjectResponse = <T,>(raw: string): T | null => {
+  const body = stripJsonEnvelope(raw);
   try {
-    return JSON.parse(stripJsonEnvelope(raw)) as T;
+    return JSON.parse(body) as T;
   } catch {
-    return null;
+    // Long plans can hit the token limit mid-object; salvage what was completed.
+    const repaired = repairTruncatedJson(body);
+    if (repaired === null) return null;
+    try {
+      return JSON.parse(repaired) as T;
+    } catch {
+      return null;
+    }
   }
 };
 
@@ -429,53 +387,48 @@ const normalizePlan = (
   };
 };
 
-const resolveActionAssignmentId = (
-  action: RawCoordinatorAction,
-  snapshot: Array<{ assignmentId: string; label: string; role: AgentRoleType }>,
-): string | null => {
-  const candidateValues = [action.assignmentId, action.label, action.role]
-    .filter((value): value is string => typeof value === 'string' && value.trim().length > 0)
-    .map((value) => value.trim());
+export class ClaudeCoordinator {
+  async hasClaudeKey(): Promise<boolean> {
+    return this.hasCoordinatorKey('claude');
+  }
 
-  for (const candidateValue of candidateValues) {
-    const normalized = sanitizeId(candidateValue);
-    const directMatch = snapshot.find(
-      (item) =>
-        item.assignmentId === normalized || sanitizeId(item.label) === normalized,
-    );
-    if (directMatch) {
-      return directMatch.assignmentId;
-    }
-
-    const role = normalizeRoleType(candidateValue);
-    if (role) {
-      const roleMatches = snapshot.filter((item) => item.role === role);
-      if (roleMatches.length === 1) {
-        return roleMatches[0].assignmentId;
-      }
-      if (roleMatches.length > 1) {
-        return roleMatches[0].assignmentId;
-      }
+  async hasCoordinatorKey(provider: ProviderID): Promise<boolean> {
+    try {
+      const key = await invoke<string>('get_api_key', { provider });
+      return Boolean(key);
+    } catch {
+      return false;
     }
   }
 
-  return null;
-};
+  /** Fetch the stored API key for a provider. Returns empty string if not found. */
+  async getCoordinatorApiKey(provider: ProviderID): Promise<string> {
+    try {
+      const key = await invoke<string>('get_api_key', { provider });
+      return key || '';
+    } catch {
+      return '';
+    }
+  }
 
-export class ClaudeCoordinator {
-  private async callCoordinator(
-    prompt: string,
-    config: CoordinatorConfig,
-    options?: { label?: string; timeoutMs?: number },
-  ): Promise<string> {
-    return config.runPrompt(prompt, {
-      label: options?.label || `Coordinator (${config.cliLabel})`,
-      timeoutMs: options?.timeoutMs,
-    });
+  private async callCoordinator(prompt: string, config: CoordinatorConfig, maxTokens = 4096): Promise<string> {
+    const sessionID = await velixEngine.createSession();
+    try {
+      return await velixEngine.sendMessage({
+        sessionID,
+        text: prompt,
+        velixProviderID: config.provider,
+        velixModelID: config.model,
+        apiKey: config.apiKey,
+        maxTokens,
+      });
+    } finally {
+      await velixEngine.deleteSession(sessionID);
+    }
   }
 
   /**
-   * Scout research via the selected coordinator CLI — gathers best practices, comparisons,
+   * Scout external research via API — gathers best practices, comparisons,
    * and recommendations before the CLI agent does internal code analysis.
    */
   async scoutResearch(
@@ -507,10 +460,7 @@ export class ClaudeCoordinator {
       'Format your output as clean markdown sections.',
     ].join('\n');
 
-    return this.callCoordinator(prompt, config, {
-      label: `Scout research (${config.cliLabel})`,
-      timeoutMs: maxMode ? 240_000 : 180_000,
-    });
+    return this.callCoordinator(prompt, config, 4096);
   }
 
   async createLaunchPlan(goal: string, workspacePath: string, roles: AgentRoleType[], config?: CoordinatorConfig, maxMode?: boolean): Promise<CoordinatorPlan> {
@@ -567,109 +517,17 @@ export class ClaudeCoordinator {
       maxMode ? `\n## MAX MODE ACTIVE\nThe swarm is in MAX MODE. Write extremely detailed, thorough task prompts for each agent. Each builder task must be 5-8 sentences with specific implementation details, edge cases to handle, and quality requirements. Scout tasks must cover every relevant area exhaustively. Reviewer tasks must demand production-level quality with zero tolerance for shortcuts.` : '',
     ].filter(Boolean).join('\n');
 
-    if (!config) {
-      return normalizePlan(goal, roles, null);
-    }
-
-    try {
-      const raw = await this.callCoordinator(prompt, config, {
-        label: `Coordinator planning (${config.cliLabel})`,
-        timeoutMs: maxMode ? 300_000 : 240_000,
-      });
-      return normalizePlan(goal, roles, parseObjectResponse<CoordinatorPlan>(raw));
-    } catch (err) {
-      if (err instanceof DOMException && err.name === 'AbortError') throw err;
-      console.warn('Coordinator launch plan failed; using fallback plan:', err);
-      return normalizePlan(goal, roles, null);
-    }
-  }
-
-  async createSyncResult(
-    goal: string,
-    _workspacePath: string,
-    plan: CoordinatorPlan,
-    agents: Agent[],
-    config?: CoordinatorConfig,
-  ): Promise<CoordinatorSyncResult> {
-    // Full snapshot used for action routing (resolveActionAssignmentId needs assignmentId).
-    const snapshot = agents.map((agent) => ({
-      assignmentId: agent.assignmentId || sanitizeId(agent.label || agent.role.name || agent.id),
-      label: agent.label || agent.role.name,
-      role: agent.role.type,
-    }));
-
-    // Compact snapshot for the prompt — what the coordinator needs to assess state.
-    const promptSnapshot = agents.map((agent) => {
-      const assignment = plan.assignments.find((a) => a.id === agent.assignmentId);
-      return {
-        id: agent.assignmentId || sanitizeId(agent.label || agent.role.name || agent.id),
-        label: agent.label || agent.role.name,
-        role: agent.role.type,
-        status: agent.status,
-        task: assignment?.task || agent.assignedTask || '',
-        ownedFiles: assignment?.ownedFiles || [],
-        // Last 15 lines, max 1200 chars — enough to understand progress and detect issues
-        tail: agent.outputBuffer.slice(-15).join('\n').slice(-1200),
-      };
-    });
-
-    const prompt = [
-      `You are the coordinator managing a coding swarm. Goal: ${goal}`,
-      `Strategy: ${plan.strategy}`,
-      '',
-      '## Current agent status',
-      JSON.stringify(promptSnapshot, null, 1),
-      '',
-      '## Your job',
-      '- Assess whether each agent is making progress on their assigned task.',
-      '- If an agent is stuck, drifting off-task, or working outside their owned files, send a corrective action.',
-      '- If an agent finished and another depends on it, send a nudge with relevant context.',
-      '- If everything looks good, return no actions.',
-      '',
-      'Return ONLY compact JSON:',
-      '{"summary":"...","overallStatus":"on_track|needs_attention|blocked","nextMilestone":"...","actions":[{"assignmentId":"...","message":"..."}]}',
-      '',
-      'Actions optional. Only send when redirection/handoff is needed. Keep messages actionable (2-3 sentences max).',
-    ].join('\n');
-
-    if (!config) {
-      return buildIdleSyncResult();
-    }
-
-    let raw = '';
-    try {
-      raw = await this.callCoordinator(prompt, config, {
-        label: `Coordinator sync (${config.cliLabel})`,
-        timeoutMs: 180_000,
-      });
-    } catch (err) {
-      if (err instanceof DOMException && err.name === 'AbortError') throw err;
-      console.warn('Coordinator sync failed; continuing without actions:', err);
-      return buildIdleSyncResult();
-    }
-
-    const parsed = parseObjectResponse<Partial<CoordinatorSyncResult> & { actions?: RawCoordinatorAction[] }>(raw);
-    const actions = Array.isArray(parsed?.actions)
-      ? parsed.actions
-          .map((action) => {
-            const assignmentId = resolveActionAssignmentId(action, snapshot);
-            const message = typeof action.message === 'string' ? action.message.trim() : '';
-            if (!assignmentId || !message) return null;
-            return { assignmentId, message };
-          })
-          .filter((action): action is CoordinatorAction => action !== null)
-      : [];
-
-    const overallStatus = parsed?.overallStatus === 'blocked' || parsed?.overallStatus === 'needs_attention'
-      ? parsed.overallStatus
-      : 'on_track';
-
-    return {
-      summary: parsed?.summary?.trim() || 'Coordinator completed a sync round.',
-      overallStatus,
-      nextMilestone: parsed?.nextMilestone?.trim() || 'Keep builders moving inside their lanes and send completed work through review.',
-      actions,
+    const resolvedConfig = config ?? {
+      provider: 'claude' as ProviderID,
+      model: PROVIDERS.find((p) => p.id === 'claude')?.models[0] ?? 'claude-sonnet-5-5',
+      apiKey: await this.getCoordinatorApiKey('claude'),
     };
+
+    // A 20-lane MAX MODE plan is several thousand tokens of JSON.
+    const raw = await this.callCoordinator(prompt, resolvedConfig, 8192);
+    const parsed = parseObjectResponse<CoordinatorPlan>(raw);
+
+    return { ...normalizePlan(goal, roles, parsed), usedFallback: parsed === null };
   }
 
   buildWorkerTask(
@@ -729,9 +587,15 @@ export class ClaudeCoordinator {
       '- If you need files outside your lane, stop and report the ownership gap instead of guessing.',
       '- Keep status updates short and operational. Mention touched files, validations, and blockers in your final summary.',
       '- Prioritize shipping code over conversation. Escalate quickly if blocked.',
-      '- Do NOT ask follow-up questions or request clarification. Work with the information you have. If anything is ambiguous, make a reasonable decision and note it in your summary.',
-      '- When your assigned work is fully complete, end this interactive session using your CLI\'s normal quit flow (e.g. /exit, exit, quit, or Ctrl+D — see your tool\'s docs) so the swarm can continue.',
+      '- Do NOT ask follow-up questions or request clarification. You are running non-interactively — nobody can answer. Work with the information you have. If anything is ambiguous, make a reasonable decision and note it in your summary.',
+      '- You are running in one-shot mode: do all your work, then print your final structured report block (as defined in your role instructions) as the last thing in your output.',
     );
+
+    if (assignment.role === 'reviewer') {
+      lines.push(
+        '- Do not trust the builders\' reports alone: inspect the real working tree (`git status`, `git diff`) and read the changed files, then run the project\'s tests/build if they exist.',
+      );
+    }
 
     if (maxMode) {
       lines.push('', MAX_MODE_DIRECTIVE);
@@ -781,22 +645,13 @@ export class ClaudeCoordinator {
       'revisionInstructions: If REVISE, compile all reviewer feedback into clear, actionable instructions for builders. If APPROVED, leave empty.',
     ].join('\n');
 
-    if (!config) {
-      return evaluateReviewLocally(reviewerOutputs);
-    }
+    const resolvedConfig = config ?? {
+      provider: 'claude' as ProviderID,
+      model: PROVIDERS.find((p) => p.id === 'claude')?.models[0] ?? 'claude-sonnet-5-5',
+      apiKey: await this.getCoordinatorApiKey('claude'),
+    };
 
-    let raw = '';
-    try {
-      raw = await this.callCoordinator(prompt, config, {
-        label: `Coordinator review (${config.cliLabel})`,
-        timeoutMs: 180_000,
-      });
-    } catch (err) {
-      if (err instanceof DOMException && err.name === 'AbortError') throw err;
-      console.warn('Coordinator review evaluation failed; using local verdict parser:', err);
-      return evaluateReviewLocally(reviewerOutputs);
-    }
-
+    const raw = await this.callCoordinator(prompt, resolvedConfig, 2048);
     const parsed = parseObjectResponse<{ verdict?: string; summary?: string; revisionInstructions?: string }>(raw);
 
     const verdict = parsed?.verdict?.toUpperCase() === 'APPROVED' ? 'APPROVED' : 'REVISE';
@@ -854,7 +709,7 @@ export class ClaudeCoordinator {
       '- Validate your fixes before reporting completion.',
       '- End with the ---BUILDER-REPORT--- structured block.',
       '- Do NOT ask follow-up questions or request clarification. Work with the information you have.',
-      '- When the revision is complete, quit this CLI session the same way (e.g. /exit, exit, or your tool\'s documented command) so the swarm can continue.',
+      '- You are running non-interactively: finish all work, then print your final report block as the last thing in your output.',
     ];
 
     if (maxMode) {

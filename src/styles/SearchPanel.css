@@ -18,7 +18,7 @@
   margin: 0;
   font-size: 14px;
   font-weight: 600;
-  font-family: var(--font-mono);
+  font-family: var(--font-sans);
   color: var(--text-primary);
 }
 
@@ -62,7 +62,7 @@
 .search-btn {
   padding: 10px 20px;
   font-size: 13px;
-  font-family: var(--font-mono);
+  font-family: var(--font-sans);
   font-weight: 600;
   background: var(--gradient-accent);
   color: white;
@@ -93,7 +93,7 @@
   align-items: center;
   gap: 8px;
   font-size: 12px;
-  font-family: var(--font-mono);
+  font-family: var(--font-sans);
   color: var(--text-secondary);
   cursor: pointer;
   user-select: none;
@@ -120,7 +120,7 @@
   text-align: center;
   color: var(--text-muted);
   font-size: 13px;
-  font-family: var(--font-mono);
+  font-family: var(--font-sans);
 }
 
 .search-summary {
@@ -128,7 +128,7 @@
   background-color: var(--bg-sidebar);
   border-bottom: 1px solid var(--border-light);
   font-size: 12px;
-  font-family: var(--font-mono);
+  font-family: var(--font-sans);
   color: var(--text-muted);
 }
 

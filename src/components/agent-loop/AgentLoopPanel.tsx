@@ -21,17 +21,25 @@ import { aiService } from '../../services/ai';
 import { PROVIDER_CATALOG, type ProviderID } from '../../services/ai/modelCatalog';
 import {
   AgentManager,
-  SwarmEventEmitter,
   detectWorkerCLIAvailability,
+  getRole,
+  tauriAgentTransport,
   getWorkerCLIOptions,
 } from '../../services/swarm';
 import type { WorkerCLI } from '../../services/swarm/types';
-import {
-  WORKER_CLI_STORAGE_KEY,
-  buildDefaultWorkerCLIAvailability,
-  type WorkerCLIAvailability,
-} from '../swarm/swarmPanelModel';
 import './AgentLoopPanel.css';
+
+type WorkerCLIAvailability = Record<WorkerCLI, { available: boolean; detail: string }>;
+
+const WORKER_CLI_STORAGE_KEY = 'velix-swarm-worker-cli';
+
+const buildDefaultWorkerCLIAvailability = (): WorkerCLIAvailability =>
+  Object.fromEntries(
+    getWorkerCLIOptions().map((option) => [
+      option.id,
+      { available: false, detail: 'Checking availability…' },
+    ]),
+  ) as WorkerCLIAvailability;
 
 interface AgentLoopPanelProps {
   isOpen: boolean;
@@ -200,7 +208,7 @@ export const AgentLoopPanel: React.FC<AgentLoopPanelProps> = ({
       return;
     }
 
-    const manager = new AgentManager(new SwarmEventEmitter(), workspacePath);
+    const manager = new AgentManager(workspacePath, tauriAgentTransport);
     manager.setWorkerCLI(workerCLI);
     managerRef.current = manager;
 
@@ -226,7 +234,7 @@ export const AgentLoopPanel: React.FC<AgentLoopPanelProps> = ({
         .terminateAll('Agent loop panel closed')
         .catch(() => {})
         .finally(() => {
-          void manager.cleanup();
+          void manager.dispose();
         });
       managerRef.current = null;
     };
@@ -252,7 +260,7 @@ export const AgentLoopPanel: React.FC<AgentLoopPanelProps> = ({
     setIsCheckingWorkerCLI(true);
     setWorkerCLIAvailability(buildDefaultWorkerCLIAvailability());
 
-    detectWorkerCLIAvailability(workspacePath)
+    detectWorkerCLIAvailability()
       .then((availability) => {
         if (!cancelled) setWorkerCLIAvailability(availability);
       })
@@ -383,16 +391,32 @@ export const AgentLoopPanel: React.FC<AgentLoopPanelProps> = ({
       maxRetries: DEFAULT_LOOP_CONFIG.maxRetries,
       workerCLI: useCli ? workerCLI : undefined,
       runCliPrompt: useCli
-        ? (system, user, opts) =>
-            manager!.runCoordinatorPrompt(`${system}\n\n---\n\n${user}`, {
-              signal: opts?.signal,
-              label: opts?.label,
+        ? async (system, user, opts) => {
+            const label = opts?.label ?? 'Agent loop';
+            opts?.onProgress?.(`${label}: running ${workerCLI} headless…`);
+            const pending = manager!.runPrompt(getRole('planner'), `${system}\n\n---\n\n${user}`, {
+              label,
               timeoutMs: 300_000,
-              expectJson: opts?.expectJson ?? true,
-              jsonShape: opts?.jsonShape,
-              validateResult: opts?.validateResult,
-              onProgress: opts?.onProgress,
-            })
+            });
+            const onAbort = () => {
+              const running = manager!.getAllAgents().find((a) => a.label === label && (a.status === 'running' || a.status === 'initializing'));
+              if (running) void manager!.terminateAgent(running.id, 'Agent loop stopped');
+            };
+            opts?.signal?.addEventListener('abort', onAbort, { once: true });
+            try {
+              const result = await pending;
+              if (opts?.signal?.aborted) throw new DOMException('Aborted', 'AbortError');
+              if (result.status !== 'completed') {
+                throw new Error(result.failureReason || `${label} ${result.status}`);
+              }
+              if (opts?.validateResult && !opts.validateResult(result.output)) {
+                throw new Error(`${label} returned output in an unexpected format`);
+              }
+              return result.output;
+            } finally {
+              opts?.signal?.removeEventListener('abort', onAbort);
+            }
+          }
         : undefined,
     };
 

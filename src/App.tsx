@@ -9,7 +9,10 @@ import { GitPanel } from "./components/GitPanel";
 import { VoiceChat } from "./components/VoiceChat";
 import { SwarmPanel } from "./components/swarm/SwarmPanel";
 import { AgentLoopPanel } from "./components/agent-loop";
-import { CommandPalette, type CommandPaletteItem } from "./components/CommandPalette";
+import { CommandPalette, type PaletteCommand } from "./components/CommandPalette";
+import { ShortcutsSheet } from "./components/ShortcutsSheet";
+import { useSwarmSession } from "./hooks/useSwarmSession";
+import { SWARM_PRESETS, isRunActive, requestSwarmPreset, swarmSession } from "./services/swarm";
 import { aiService } from "./services/ai";
 import { workspaceService, WorkspaceContext } from "./services/workspace";
 
@@ -118,6 +121,10 @@ function shouldHandleTerminalWorkspaceShortcut(target: EventTarget | null): bool
 
 function App() {
   const [showSettings, setShowSettings] = useState(false);
+  const [showPalette, setShowPalette] = useState(false);
+  const [showShortcuts, setShowShortcuts] = useState(false);
+  const swarm = useSwarmSession();
+  const swarmActive = isRunActive(swarm.phase);
   const [showSetupScreen, setShowSetupScreen] = useState<boolean>(() => {
     if (typeof window === "undefined") return false;
     const hasSeenSetup = localStorage.getItem("velix-setup-seen") === "true";
@@ -135,7 +142,6 @@ function App() {
   const [showVoiceSetup, setShowVoiceSetup] = useState(false);
   const [swarmTabOpen, setSwarmTabOpen] = useState(false);
   const [loopTabOpen, setLoopTabOpen] = useState(false);
-  const [commandPaletteOpen, setCommandPaletteOpen] = useState(false);
   const [openaiApiKey, setOpenaiApiKey] = useState("");
   const voiceSetupRef = useRef<HTMLDivElement>(null);
   const [_isAIProcessing, setIsAIProcessing] = useState(false);
@@ -775,17 +781,6 @@ function App() {
       const target = e.target as HTMLElement;
       const tag = target.tagName;
 
-      if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "k") {
-        const inPalette = target.closest(".command-palette-panel");
-        if (!commandPaletteOpen) {
-          if (target.isContentEditable) return;
-          if ((tag === "INPUT" || tag === "TEXTAREA") && !inPalette) return;
-        }
-        e.preventDefault();
-        setCommandPaletteOpen((open) => !open);
-        return;
-      }
-
       if ((e.metaKey || e.ctrlKey) && e.shiftKey && e.key.toLowerCase() === "a") {
         if (!currentDir) return;
         e.preventDefault();
@@ -814,11 +809,28 @@ function App() {
         closeActivePaneOrTab();
         return;
       }
+
+      if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "k") {
+        e.preventDefault();
+        setShowShortcuts(false);
+        setShowPalette((open) => !open);
+      }
+
+      if ((e.metaKey || e.ctrlKey) && e.key === "/") {
+        e.preventDefault();
+        setShowPalette(false);
+        setShowShortcuts((open) => !open);
+      }
+
+      if ((e.metaKey || e.ctrlKey) && e.key === ",") {
+        e.preventDefault();
+        setShowSettings(true);
+      }
     };
 
     window.addEventListener("keydown", handleGlobalKeyDown, true);
     return () => window.removeEventListener("keydown", handleGlobalKeyDown, true);
-  }, [addSplitPane, closeActivePaneOrTab, commandPaletteOpen, currentDir, handlePairSplitChord]);
+  }, [addSplitPane, closeActivePaneOrTab, currentDir, handlePairSplitChord]);
 
   const getActivePaneRefs = useCallback(() => (
     activeWorkspaceTab?.panes
@@ -1282,6 +1294,55 @@ Working directory: ${currentDir || "unknown"}`;
     setShowVoiceChat(panel === "voice" ? !showVoiceChat : false);
   };
 
+  const isMac = typeof navigator !== "undefined" && /Mac|iPhone|iPad/.test(navigator.platform);
+  const mod = isMac ? "⌘" : "Ctrl+";
+
+  const openSwarmWithPreset = (presetId: string) => {
+    if (!currentDir) return;
+    requestSwarmPreset(presetId);
+    if (!swarmTabOpen || activeTerminalId !== "swarm") {
+      setSwarmTabOpen(true);
+      setActiveTerminalId("swarm");
+    }
+  };
+
+  const paletteCommands: PaletteCommand[] = [
+    { id: "terminal", group: "Go to", title: "Terminal", run: () => togglePanel(null) },
+    { id: "git", group: "Go to", title: "Git panel", run: () => togglePanel("git") },
+    { id: "search", group: "Go to", title: "Search in project", run: () => togglePanel("search") },
+    { id: "agent-loop", group: "Go to", title: "Agent Loop", hint: currentDir ? "autonomous goal-driven coding" : "open a project first", when: !!currentDir, run: () => { setLoopTabOpen(true); setActiveTerminalId("loop"); } },
+    { id: "swarm", group: "Go to", title: "Swarm", hint: currentDir ? undefined : "open a project first", when: !!currentDir, run: () => { if (!swarmTabOpen || activeTerminalId !== "swarm") togglePanel("swarm"); } },
+    { id: "voice", group: "Go to", title: "Voice chat", when: !!openaiApiKey, run: () => togglePanel("voice") },
+    ...SWARM_PRESETS.map((preset): PaletteCommand => ({
+      id: `swarm-${preset.id}`,
+      group: "Swarm",
+      title: preset.name,
+      hint: preset.blurb,
+      when: !!currentDir,
+      run: () => openSwarmWithPreset(preset.id),
+    })),
+    { id: "swarm-stop", group: "Swarm", title: "Stop the running swarm", when: swarmActive, run: () => { void swarmSession.stop(); } },
+    { id: "split", group: "Terminal", title: "Split pane", shortcut: `${mod}D`, run: () => addSplitPane() },
+    { id: "split-shift", group: "Terminal", title: activeWorkspaceTab?.panes.length === 2 ? "Toggle split orientation" : "Split pane (stacked)", shortcut: `${mod}⇧D`, when: !!activeWorkspaceTab && activeWorkspaceTab.panes.length <= 2, run: () => handlePairSplitChord() },
+    { id: "new-tab", group: "Terminal", title: "New tab", run: () => addWorkspaceTab() },
+    { id: "close-pane", group: "Terminal", title: "Close pane or tab", shortcut: `${mod}W`, run: () => closeActivePaneOrTab() },
+    { id: "open-folder", group: "Project", title: currentDir ? "Change project folder…" : "Open project folder…", run: () => { void handleOpenProject(); } },
+    { id: "theme", group: "App", title: theme === "dark" ? "Switch to light theme" : "Switch to dark theme", run: () => handleThemeChange(theme === "dark" ? "light" : "dark") },
+    { id: "settings", group: "App", title: "Settings", shortcut: `${mod},`, run: () => setShowSettings(true) },
+    { id: "shortcuts", group: "App", title: "Keyboard shortcuts", shortcut: `${mod}/`, run: () => setShowShortcuts(true) },
+  ];
+
+  const shortcutRows = [
+    { keys: `${mod}K`, action: "Command palette" },
+    { keys: `${mod}/`, action: "Keyboard shortcuts" },
+    { keys: `${mod},`, action: "Settings" },
+    { keys: `${mod}D`, action: "Split the terminal pane" },
+    { keys: `${mod}⇧D`, action: "Stacked split / toggle orientation" },
+    { keys: `${mod}⇧A`, action: "Open Swarm" },
+    { keys: `${mod}W`, action: "Close pane or tab" },
+    { keys: `${mod}↵`, action: "Launch the swarm (goal box focused)" },
+  ];
+
   const canShowVoiceChat = showVoiceChat && !!openaiApiKey;
   const hasRightPanel = showSearchPanel || showGitPanel || canShowVoiceChat;
   const projectName = currentDir ? getPathLeaf(currentDir) : "No project open";
@@ -1293,132 +1354,6 @@ Working directory: ${currentDir || "unknown"}`;
     : activeTerminalId === 'loop'
       ? 'Agent Loop'
       : activeWorkspaceTitle;
-
-  const modShortcutLabel =
-    typeof navigator !== "undefined" && /Mac|iPhone|iPod|iPad/i.test(navigator.userAgent)
-      ? "⌘"
-      : "Ctrl+";
-
-  const commandPaletteItems = useMemo((): CommandPaletteItem[] => {
-    return [
-      {
-        id: "agent-loop",
-        title: "Open Agent Loop",
-        subtitle: "Autonomous goal-driven coding with role-based models",
-        keywords: ["loop", "autonomous", "agent"],
-        disabled: !currentDir,
-        onSelect: () => {
-          setLoopTabOpen(true);
-          setActiveTerminalId("loop");
-        },
-      },
-      {
-        id: "agents",
-        title: "Open Agents",
-        subtitle: "Coordinator, scouts, builders, and reviewer CLIs",
-        keywords: ["swarm", "multi-agent", "claude"],
-        shortcut: `${modShortcutLabel}⇧A`,
-        disabled: !currentDir,
-        onSelect: () => {
-          setSwarmTabOpen(true);
-          setActiveTerminalId("swarm");
-        },
-      },
-      {
-        id: "terminal",
-        title: "Focus terminal",
-        subtitle: "Shell tabs and splits",
-        keywords: ["shell"],
-        onSelect: () => {
-          const id = workspaceTabs.some((t) => t.id === lastWorkspaceTabId)
-            ? lastWorkspaceTabId
-            : workspaceTabs[0]?.id || "";
-          if (id) setActiveTerminalId(id);
-        },
-      },
-      {
-        id: "open-project",
-        title: "Open project folder",
-        subtitle: "Workspace root for context, git, and agents",
-        keywords: ["folder", "directory"],
-        onSelect: () => void handleOpenProject(),
-      },
-      {
-        id: "new-tab",
-        title: "New terminal tab",
-        onSelect: () => addWorkspaceTab(),
-      },
-      {
-        id: "split",
-        title: "Split terminal pane",
-        subtitle: "Side-by-side panes in the active tab",
-        keywords: ["divide", "pane", "multi", "warp"],
-        shortcut: `${modShortcutLabel}D`,
-        onSelect: () => addSplitPane(),
-      },
-      {
-        id: "split-shift",
-        title:
-          activeWorkspaceTab?.panes.length === 2
-            ? "Toggle split orientation"
-            : "Split terminal pane (stacked)",
-        subtitle:
-          activeWorkspaceTab?.panes.length === 2
-            ? "Side-by-side ↔ stacked"
-            : "New pane below (when one pane)",
-        keywords: ["vertical", "stack", "layout", "horizontal"],
-        shortcut: `${modShortcutLabel}⇧D`,
-        disabled: !activeWorkspaceTab || activeWorkspaceTab.panes.length > 2,
-        onSelect: () => handlePairSplitChord(),
-      },
-      {
-        id: "close-pane",
-        title: "Close active pane or tab",
-        shortcut: `${modShortcutLabel}W`,
-        onSelect: () => closeActivePaneOrTab(),
-      },
-      {
-        id: "search",
-        title: "Toggle search panel",
-        onSelect: () => togglePanel("search"),
-      },
-      {
-        id: "git",
-        title: "Toggle git panel",
-        onSelect: () => togglePanel("git"),
-      },
-      {
-        id: "collapse-side",
-        title: "Hide side panels",
-        subtitle: "Full-width terminal",
-        onSelect: () => togglePanel(null),
-      },
-      {
-        id: "settings",
-        title: "Open settings",
-        onSelect: () => setShowSettings(true),
-      },
-      {
-        id: "theme",
-        title: theme === "dark" ? "Use light theme" : "Use dark theme",
-        onSelect: () => handleThemeChange(theme === "dark" ? "light" : "dark"),
-      },
-    ];
-  }, [
-    modShortcutLabel,
-    currentDir,
-    workspaceTabs,
-    lastWorkspaceTabId,
-    theme,
-    addWorkspaceTab,
-    addSplitPane,
-    closeActivePaneOrTab,
-    handleOpenProject,
-    handleThemeChange,
-    togglePanel,
-    activeWorkspaceTab,
-    handlePairSplitChord,
-  ]);
 
   const getPaneGridStyle = useCallback((paneCount: number) => {
     if (paneCount <= 1) return undefined;
@@ -1573,6 +1508,7 @@ Working directory: ${currentDir || "unknown"}`;
               <line x1="12" y1="12" x2="5" y2="16.5" />
               <line x1="12" y1="12" x2="19" y2="16.5" />
             </svg>
+            {swarmActive && <span className="activity-btn-live" aria-label="Swarm running" />}
           </button>
         </div>
 
@@ -1698,12 +1634,10 @@ Working directory: ${currentDir || "unknown"}`;
                   style={activeTerminalId === "swarm" ? undefined : { visibility: "hidden", position: "absolute", inset: 0, pointerEvents: "none" }}
                 >
                   <SwarmPanel
-                    isOpen={true}
-                    onClose={closeSwarmTab}
                     theme={theme}
                     workspacePath={currentDir}
-                    hasApiKey={!!aiConfig?.apiKey}
-                    apiProvider={aiConfig?.provider}
+                    onOpenSettings={() => setShowSettings(true)}
+                    onOpenGit={() => togglePanel("git")}
                   />
                 </div>
               )}
@@ -1999,13 +1933,19 @@ Working directory: ${currentDir || "unknown"}`;
         </div>
 
         <div className="status-right">
-          <button
-            type="button"
-            className="status-item status-cmd-palette-btn"
-            onClick={() => setCommandPaletteOpen(true)}
-            title="Command palette"
-          >
-            {modShortcutLabel}K
+          {swarmActive && (
+            <button
+              type="button"
+              className="status-item status-swarm"
+              onClick={() => { setSwarmTabOpen(true); setActiveTerminalId("swarm"); }}
+              title="A swarm is running — click to open it"
+            >
+              <span className="status-swarm-dot" aria-hidden />
+              Swarm · {swarm.label}
+            </button>
+          )}
+          <button type="button" className="status-item status-theme-btn" onClick={() => setShowPalette(true)} title={`Command palette (${mod}K)`}>
+            {mod}K
           </button>
           <span className="status-item">{activeTerminalTitle}</span>
           <button
@@ -2019,13 +1959,6 @@ Working directory: ${currentDir || "unknown"}`;
         </div>
       </div>
 
-      <CommandPalette
-        open={commandPaletteOpen}
-        onClose={() => setCommandPaletteOpen(false)}
-        theme={theme}
-        items={commandPaletteItems}
-      />
-
       <Settings
         isOpen={showSettings}
         onClose={() => setShowSettings(false)}
@@ -2034,6 +1967,9 @@ Working directory: ${currentDir || "unknown"}`;
         theme={theme}
         onThemeChange={handleThemeChange}
       />
+
+      <CommandPalette isOpen={showPalette} onClose={() => setShowPalette(false)} commands={paletteCommands} />
+      <ShortcutsSheet isOpen={showShortcuts} onClose={() => setShowShortcuts(false)} rows={shortcutRows} />
 
       <SetupScreen
         isOpen={showSetupScreen}

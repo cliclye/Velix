@@ -36,7 +36,10 @@ export const PROVIDER_CATALOG: AIProviderCatalogEntry[] = [
       'Copy the key — it starts with sk-ant-',
     ],
     models: [
-      { id: 'claude-sonnet-4-6', label: 'Sonnet 4.6', description: 'Best balance of speed and capability' },
+      { id: 'claude-opus-5-5', label: 'Opus 5.5', description: 'Strongest Claude model' },
+      { id: 'claude-sonnet-5-5', label: 'Sonnet 5.5', description: 'Best balance of speed and capability' },
+      { id: 'claude-haiku-5-5', label: 'Haiku 5.5', description: 'Fast and cost-effective' },
+      { id: 'claude-sonnet-4-6', label: 'Sonnet 4.6', description: 'Previous-generation balanced model' },
       { id: 'claude-opus-4-8', label: 'Opus 4.8', description: 'Strongest Claude model' },
       { id: 'claude-haiku-4-5', label: 'Haiku 4.5', description: 'Fast and cost-effective' },
       { id: 'claude-fable-5', label: 'Fable 5', description: 'Coming soon', disabled: true },

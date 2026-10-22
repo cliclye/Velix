@@ -11,6 +11,7 @@ import { executeAction, parseActionsFromResponse, actionsAreResearchOnly, action
 import { runVerification } from './Verifier';
 import {
   canClaimGoalReached,
+  isPlaceholderPlanText,
   isResearchTask,
   isValidPlanOutput,
 } from './loopValidators';
